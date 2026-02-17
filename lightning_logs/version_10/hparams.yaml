@@ -1,0 +1,22 @@
+model_params:
+  backbone_fau: swin_transformer_tiny
+  num_frames: 128
+  au_ckpt_path: ./src/backbones/MEGraphAU/checkpoints/MEFARG_swin_tiny_BP4D_fold1.pth
+  phys_ckpt_path: ./src/backbones/rPPGToolbox/final_model_release/PURE_PhysNet_DiffNormalized.pth
+  num_classes: 2
+  dropout: 0.3
+  videomae_model_name: MCG-NJU/videomae-base
+  num_au_classes: 12
+  lora_cfg:
+    inference_mode: false
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.15
+    target_modules:
+    - query
+    - value
+    - key
+lr: 0.0001
+weight_decay: 0.05
+T_max: 10
+num_classes: 2
