@@ -69,8 +69,6 @@ class DeepfakeDetector(nn.Module):
 
         x_au_input = x_video.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
         au_raw, cl, cl_edge= self.au_encoder(x_au_input)
-        
-        print(f'[FAU EMBED SHAPE] | {au_raw.shape}')
         tokens_au = self.au_proj(au_raw)
 
         tokens_au = tokens_au.view(B, T, -1, tokens_au.shape[-1])
@@ -84,23 +82,13 @@ class DeepfakeDetector(nn.Module):
         tokens_au = tokens_au.flatten(1, 2)
 
         rPPG, phys_raw = self.phys_encoder(x_video)
-        
-        print(f'[PHYSNET EMBED SHAPE] | {phys_raw.shape}')
-        
         tokens_phys = self.phys_proj(phys_raw)
         tokens_phys = self.pos(tokens_phys)
         tokens_phys = tokens_phys + self.segment_embed(torch.tensor(1, device=device))
         combined_embeddings = torch.cat([tokens_au, tokens_phys], dim=1)
-
-        print(f'[INPUT VIDEO MAE EMBEDDINGS SHAPE] | {combined_embeddings.shape}')
-        
         outputs = self.videomae.encoder(combined_embeddings)
         last_hidden_state = outputs.last_hidden_state
         features, attn_weights = self.attn_pooler(last_hidden_state)
-        
-        print(f'[POOLER FEATURES SHAPE] {features.shape}')
-        print(f'[POOLER ATTENTION WEIGHTS SHAPE] {attn_weights.shape}')
-        
         logits = self.classifier(self.dropout(self.norm(features)))
 
         if return_info:

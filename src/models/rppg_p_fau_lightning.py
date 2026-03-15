@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import lightning as pl
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchmetrics
-from src.models.rppg_p_fau_maedec import DeepfakeDetector
+from src.models.rppg_p_fau import DeepfakeDetector
 from src.loss.contrastive import InfoNCEConsistencyLoss
 
 
@@ -101,7 +101,7 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         return val_loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay

@@ -1,14 +1,14 @@
 import typer
 from pathlib import Path
 from omegaconf import OmegaConf
-from torchvision import transforms
-from torch.utils.data import DataLoader, ConcatDataset 
+from torch.utils.data import DataLoader, ConcatDataset
 import os
 import lightning as pl
 from typing import List, Optional
 from dotenv import load_dotenv
 from src.models.rppg_p_fau_lightning import FauRPPGDeepFakeRecognizer
 from src.data.dataset import VideoFolderDataset, split_dataset
+from src.data.transforms import VideoTransform
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
@@ -51,31 +51,32 @@ def train(
         if not os.path.exists(config_path):
             raise Exception(f'Config not found in {config_base_path}')
 
-    data_transforms = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    train_transform = VideoTransform(size=(224, 224), training=True)
+    val_transform = VideoTransform(size=(224, 224), training=False)
 
-    all_datasets = []
+    train_datasets = []
+    val_datasets = []
     for path in dataset_paths:
         if os.path.exists(path):
             typer.echo(f"📦 Загрузка датасета из: {path}")
-            ds = VideoFolderDataset(path, transform=data_transforms)
-            all_datasets.append(ds)
+            train_datasets.append(VideoFolderDataset(path, video_transform=train_transform))
+            val_datasets.append(VideoFolderDataset(path, video_transform=val_transform))
         else:
             typer.echo(f"⚠️ Путь не найден и будет пропущен: {path}")
 
-    if not all_datasets:
+    if not train_datasets:
         raise Exception("Ни один датасет не был загружен. Проверьте пути.")
 
-    full_dataset = ConcatDataset(all_datasets)
-    
-    base_classes = getattr(all_datasets[0], 'classes', 'Unknown')
-    typer.echo(f"Classes (from first DS): {base_classes}")
-    typer.echo(f"Total images: {len(full_dataset)}")
+    full_train_dataset = ConcatDataset(train_datasets)
+    full_val_dataset = ConcatDataset(val_datasets)
 
-    train_ds, val_ds, test_ds = split_dataset(full_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
+    base_classes = getattr(train_datasets[0], 'classes', 'Unknown')
+    typer.echo(f"Classes (from first DS): {base_classes}")
+    typer.echo(f"Total videos: {len(full_train_dataset)}")
+
+    # Same seed → same split indices for both datasets
+    train_ds, _, _ = split_dataset(full_train_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
+    _, val_ds, test_ds = split_dataset(full_val_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
     typer.echo(f"Split -> Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
@@ -97,15 +98,11 @@ def train(
         'phys_ckpt_path': './src/backbones/rPPGToolbox/final_model_release/PURE_PhysNet_DiffNormalized.pth',
         'num_classes':  2,
         'dropout':  0.3,
-        "videomae_model_name": 'MCG-NJU/videomae-base',
-        "num_au_classes": 12,
-        "lora_cfg": {
-            "inference_mode": False,
-            "r": 16,
-            "lora_alpha": 32,
-            "lora_dropout": 0.15,
-            "target_modules": ["query", "value", "key"]
-        }
+        'num_au_classes': 12,
+        'embed_dim': 512,
+        'num_queries': 32,
+        'num_decoder_layers': 6,
+        'nhead': 8,
     })
 
     file_config = OmegaConf.load(config_path)
@@ -142,8 +139,8 @@ def train(
 
     early_stop_callback = EarlyStopping(
         monitor='val_auc',
-        min_delta=0.001,              
-        patience=50,                  
+        min_delta=0.001,
+        patience=15,
         verbose=True,
         mode='max'
     )

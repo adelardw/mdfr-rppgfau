@@ -144,29 +144,30 @@ class VideoFolderDataset_OLD(Dataset):
 
 
 class VideoFolderDataset(Dataset):
-    def __init__(self, root_dir, transform=None, valid_extensions=('.mp4', '.avi', '.mov', '.mkv'), frames_per_video=32):
+    def __init__(self, root_dir, transform=None, video_transform=None,
+                 valid_extensions=('.mp4', '.avi', '.mov', '.mkv'), frames_per_video=32):
         self.root_dir = root_dir
         self.transform = transform
+        self.video_transform = video_transform
         self.valid_extensions = valid_extensions
         self.frames_per_video = frames_per_video
-        
+
         self.samples = []
         self.classes = []
         self.class_to_idx = {}
 
         if not os.path.exists(root_dir):
-            raise FileNotFoundError(f"Folder {root_dir} not found")      
+            raise FileNotFoundError(f"Folder {root_dir} not found")
         subdirs = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
         for idx, class_name in enumerate(subdirs):
             self.classes.append(class_name)
             self.class_to_idx[class_name] = idx
             class_folder = os.path.join(root_dir, class_name)
-            
+
             for root, _, files in os.walk(class_folder):
                 for file in files:
                     if file.lower().endswith(self.valid_extensions):
                         path = os.path.join(root, file)
-                        print(root, idx)
                         self.samples.append((path, idx))
 
         print(f"Found {len(self.samples)} videos in {root_dir}")
@@ -223,11 +224,15 @@ class VideoFolderDataset(Dataset):
         except Exception as e:
             frames = self._get_dummy_video()
 
-        if self.transform:
+        if self.video_transform:
+            video_tensor = self.video_transform(frames)
+        elif self.transform:
             frames = [self.transform(img) for img in frames]
-            
-        video_tensor = torch.stack(frames)
-        return video_tensor.permute(1, 0, 2, 3), label
+            video_tensor = torch.stack(frames).permute(1, 0, 2, 3)
+        else:
+            raise ValueError("No transform or video_transform provided")
+
+        return video_tensor, label
 
 
 
