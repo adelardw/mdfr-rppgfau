@@ -47,49 +47,11 @@ def train(
         config_base_path = os.getenv('EXPERIMENTS_CFG_FOLDER')
         typer.echo(f'[CONFIG BASE PATH] base_path={config_base_path}')
         config_path = os.path.join(config_base_path, config_path)
-        
+
         if not os.path.exists(config_path):
             raise Exception(f'Config not found in {config_base_path}')
 
-    train_transform = VideoTransform(size=(224, 224), training=True)
-    val_transform = VideoTransform(size=(224, 224), training=False)
-
-    train_datasets = []
-    val_datasets = []
-    for path in dataset_paths:
-        if os.path.exists(path):
-            typer.echo(f"📦 Загрузка датасета из: {path}")
-            train_datasets.append(VideoFolderDataset(path, video_transform=train_transform))
-            val_datasets.append(VideoFolderDataset(path, video_transform=val_transform))
-        else:
-            typer.echo(f"⚠️ Путь не найден и будет пропущен: {path}")
-
-    if not train_datasets:
-        raise Exception("Ни один датасет не был загружен. Проверьте пути.")
-
-    full_train_dataset = ConcatDataset(train_datasets)
-    full_val_dataset = ConcatDataset(val_datasets)
-
-    base_classes = getattr(train_datasets[0], 'classes', 'Unknown')
-    typer.echo(f"Classes (from first DS): {base_classes}")
-    typer.echo(f"Total videos: {len(full_train_dataset)}")
-
-    # Same seed → same split indices for both datasets
-    train_ds, _, _ = split_dataset(full_train_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
-    _, val_ds, test_ds = split_dataset(full_val_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
-    typer.echo(f"Split -> Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-                              pin_memory=True,
-                              persistent_workers=True)
-    
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, 
-                            num_workers=num_workers,
-                            pin_memory=True,
-                            persistent_workers=True)
-
     typer.echo(f"📂 Загрузка конфигурации из: {config_path}")
-
 
     default_model_cfg = OmegaConf.create({
         'backbone_fau': 'swin_transformer_tiny',
@@ -111,8 +73,48 @@ def train(
     train_cfg = file_config.train_params
     trainer_cfg = file_config.trainer_params
 
-    final_config = OmegaConf.merge(model_cfg, default_model_cfg)
+    final_config = OmegaConf.merge(default_model_cfg, model_cfg)
     model_cfg = OmegaConf.to_container(final_config, resolve=True)
+
+    num_frames = model_cfg['num_frames']
+    typer.echo(f"📐 num_frames={num_frames}")
+
+    train_transform = VideoTransform(size=(224, 224), training=True)
+    val_transform = VideoTransform(size=(224, 224), training=False)
+
+    train_datasets = []
+    val_datasets = []
+    for path in dataset_paths:
+        if os.path.exists(path):
+            typer.echo(f"📦 Загрузка датасета из: {path}")
+            train_datasets.append(VideoFolderDataset(path, video_transform=train_transform, frames_per_video=num_frames))
+            val_datasets.append(VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames))
+        else:
+            typer.echo(f"⚠️ Путь не найден и будет пропущен: {path}")
+
+    if not train_datasets:
+        raise Exception("Ни один датасет не был загружен. Проверьте пути.")
+
+    full_train_dataset = ConcatDataset(train_datasets)
+    full_val_dataset = ConcatDataset(val_datasets)
+
+    base_classes = getattr(train_datasets[0], 'classes', 'Unknown')
+    typer.echo(f"Classes (from first DS): {base_classes}")
+    typer.echo(f"Total videos: {len(full_train_dataset)}")
+
+    # Same seed → same split indices for both datasets
+    train_ds, _, _ = split_dataset(full_train_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
+    _, val_ds, test_ds = split_dataset(full_val_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
+    typer.echo(f"Split -> Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
+                              pin_memory=True,
+                              persistent_workers=True)
+
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers,
+                            pin_memory=True,
+                            persistent_workers=True)
 
 
     lit_model = FauRPPGDeepFakeRecognizer(
