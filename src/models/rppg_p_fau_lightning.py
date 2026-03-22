@@ -26,7 +26,6 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         self.model = DeepfakeDetector(**model_params)
 
         self.criterion_ce = nn.CrossEntropyLoss()
-        self.criterion_nce = InfoNCEConsistencyLoss()
 
         self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
         self.train_f1 = torchmetrics.F1Score(task="multiclass", num_classes=num_classes, average="macro")
@@ -47,18 +46,14 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         x, y = batch
         output = self.model(x, return_info=True)
         logits = output["logits"]
-        #nce_logits = output["nce_logits"]
         attn_weights = output["attn_weights"]
 
         loss_ce = self.criterion_ce(logits, y)
 
-        #loss_nce = self.criterion_nce(nce_logits, attn_weights)
+        total_loss = loss_ce
 
-        total_loss = loss_ce # + (self.hparams.lambda_nce * loss_nce)
-
-        self.log("train_loss", total_loss, prog_bar=True, on_step=True, on_epoch=True)
-        self.log("train_ce", loss_ce, prog_bar=False, on_step=True, on_epoch=True)
-        #self.log("train_nce", loss_nce, prog_bar=False, on_step=True, on_epoch=True)
+        self.log("train_loss", total_loss, prog_bar=True, on_step=True, on_epoch=True,sync_dist=True)
+        self.log("train_ce", loss_ce, prog_bar=False, on_step=True, on_epoch=True,sync_dist=True)
 
         probs = F.softmax(logits, dim=1)
 
@@ -68,11 +63,11 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         rec = self.train_rec(logits, y)
         auc = self.train_auc(probs, y)
 
-        self.log("train_acc", acc, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("train_f1", f1, prog_bar=False, on_step=False, on_epoch=True)
-        self.log("train_auc", auc, prog_bar=False, on_step=False, on_epoch=True)
-        self.log("train_prec", prec, prog_bar=False, on_step=False, on_epoch=True)
-        self.log("train_rec", rec, prog_bar=False, on_step=False, on_epoch=True)
+        self.log("train_acc", acc, prog_bar=True, on_step=False, on_epoch=True,sync_dist=True)
+        self.log("train_f1", f1, prog_bar=False, on_step=False, on_epoch=True,sync_dist=True)
+        self.log("train_auc", auc, prog_bar=False, on_step=False, on_epoch=True,sync_dist=True)
+        self.log("train_prec", prec, prog_bar=False, on_step=False, on_epoch=True,sync_dist=True)
+        self.log("train_rec", rec, prog_bar=False, on_step=False, on_epoch=True,sync_dist=True)
 
 
         return total_loss
@@ -91,12 +86,12 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         auc = self.val_auc(probs, y)
 
 
-        self.log("val_loss", val_loss, prog_bar=True)
-        self.log("val_acc", acc, prog_bar=True)
-        self.log("val_f1", f1, prog_bar=True)
-        self.log("val_prec", prec, prog_bar=False)
-        self.log("val_rec", rec, prog_bar=False)
-        self.log("val_auc", auc, prog_bar=True)
+        self.log("val_loss", val_loss, prog_bar=True, sync_dist=True)
+        self.log("val_acc", acc, prog_bar=True,sync_dist=True)
+        self.log("val_f1", f1, prog_bar=True,sync_dist=True)
+        self.log("val_prec", prec, prog_bar=False,sync_dist=True)
+        self.log("val_rec", rec, prog_bar=False,sync_dist=True)
+        self.log("val_auc", auc, prog_bar=True,sync_dist=True)
 
         return val_loss
 

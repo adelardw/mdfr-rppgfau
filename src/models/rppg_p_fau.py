@@ -22,7 +22,8 @@ class DeepfakeDetector(nn.Module):
                  num_queries: int = 32,
                  num_decoder_layers: int = 6,
                  nhead: int = 8,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 full_train: bool = False):
         super().__init__()
 
         self.au_encoder = FAUEncoder(num_classes=num_au_classes, backbone=backbone_fau)
@@ -30,14 +31,14 @@ class DeepfakeDetector(nn.Module):
             print(f"Loading AU Checkpoint: {au_ckpt_path}")
             self.au_encoder.load_pretrained(au_ckpt_path)
             for par in self.au_encoder.parameters():
-                par.requires_grad = False
+                par.requires_grad = full_train
 
         self.phys_encoder = RPPGEncoder(frames=num_frames)
         if phys_ckpt_path:
             print(f"Loading Phys Checkpoint: {phys_ckpt_path}")
             self.phys_encoder.load_pretrained(phys_ckpt_path)
             for par in self.phys_encoder.parameters():
-                par.requires_grad = False
+                par.requires_grad = full_train
 
         self.au_proj = nn.Linear(self.au_encoder.out_channels, embed_dim)
         self.phys_proj = nn.Linear(self.phys_encoder.out_channels, embed_dim)

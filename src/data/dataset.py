@@ -53,96 +53,6 @@ class RecursiveFolderDataset(Dataset):
 
 
 
-class VideoFolderDataset_OLD(Dataset):
-    """
-    Dataset for ff++ and celebDF
-    Reads video files and returns a sequence of frames.
-    """
-    def __init__(self, root_dir, transform=None, valid_extensions=('.mp4', '.avi', '.mov'), frames_per_video=16):
-        self.root_dir = root_dir
-        self.transform = transform
-        self.valid_extensions = valid_extensions
-        self.frames_per_video = frames_per_video
-
-        self.samples = []
-        self.classes = []
-        self.class_to_idx = {}
-
-        if not os.path.exists(root_dir):
-            raise FileNotFoundError(f"Folder {root_dir} not found")
-
-        subdirs = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
-
-        for idx, class_name in enumerate(subdirs):
-            self.classes.append(class_name)
-            self.class_to_idx[class_name] = idx
-
-            class_folder = os.path.join(root_dir, class_name)
-
-            for root, _, files in os.walk(class_folder):
-                for file in files:
-                    if file.lower().endswith(self.valid_extensions):
-                        path = os.path.join(root, file)
-                        self.samples.append((path, idx))
-
-    def __len__(self):
-        return len(self.samples)
-
-    def _load_video(self, path):
-        cap = cv2.VideoCapture(path)
-        frames = []
-
-        if not cap.isOpened():
-            print(f"ERROR : {path}")
-            return self._get_dummy_video()
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        if total_frames <= 0:
-            cap.release()
-            return self._get_dummy_video()
-
-        frame_indices = np.linspace(0, total_frames - 1, self.frames_per_video, dtype=int)
-
-        current_frame_idx = 0
-        for idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-
-            if ret:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(Image.fromarray(frame))
-            else:
-                print("attention!. See class dataset")
-                frames.append(Image.new('RGB', (224, 224))) # todo: del
-
-        cap.release()
-        while len(frames) < self.frames_per_video:
-            frames.append(frames[-1] if frames else Image.new('RGB', (224, 224)))
-
-        return frames
-
-    def _get_dummy_video(self):
-        return [Image.new('RGB', (224, 224)) for _ in range(self.frames_per_video)]
-
-    def __getitem__(self, idx):
-        path, label = self.samples[idx]
-
-        try:
-            frames = self._load_video(path)
-        except Exception as e:
-            print(f"Ошибка при загрузке {path}: {e}")
-            frames = self._get_dummy_video()
-
-        if self.transform:
-            frames = [self.transform(img) for img in frames]
-
-        video_tensor = torch.stack(frames)
-
-        return video_tensor.transpose(0,1), label
-
-
-
 class VideoFolderDataset(Dataset):
     def __init__(self, root_dir, transform=None, video_transform=None,
                  valid_extensions=('.mp4', '.avi', '.mov', '.mkv'), frames_per_video=32):
@@ -278,7 +188,9 @@ if __name__ == "__main__":
     # print(f"Labels: {labels}")
 
 
-    root_path = "../datasets/ff++_videous_out"
+    #root_path = "/mnt/tank/scratch/dstoronkin/faigc_dataset/dataset/videos"
+    
+    root_path = "/mnt/tank/scratch/dstoronkin/ff++_videos_out"
 
 
     full_dataset = VideoFolderDataset(root_path, transform=data_transforms)
@@ -287,9 +199,9 @@ if __name__ == "__main__":
     print(f"Len images: {len(full_dataset)}")
     train_ds, val_ds, test_ds = split_dataset(full_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
     print(f"Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
-    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=16, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=16, shuffle=False)
     images, labels = next(iter(train_loader))
     print(f": {images.shape}")
     print(f"Labels: {labels}")

@@ -1,6 +1,6 @@
 model_params:
   backbone_fau: swin_transformer_tiny
-  num_frames: 128
+  num_frames: 32
   au_ckpt_path: ./src/backbones/MEGraphAU/checkpoints/MEFARG_swin_tiny_BP4D_fold1.pth
   phys_ckpt_path: ./src/backbones/rPPGToolbox/final_model_release/PURE_PhysNet_DiffNormalized.pth
   num_classes: 2
@@ -10,6 +10,7 @@ model_params:
   num_queries: 32
   num_decoder_layers: 6
   nhead: 8
+  full_train: true
 
 train_params:
   lr: 0.0001
