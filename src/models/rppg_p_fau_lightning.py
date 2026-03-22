@@ -16,6 +16,7 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         self,
         model_params: dict,
         lr: float = 1e-4,
+        encoder_lr: float = 1e-5,
         weight_decay: float = 1e-4,
         T_max: int = 10,
         num_classes: int = 2
@@ -96,9 +97,22 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         return val_loss
 
     def configure_optimizers(self):
+        encoder_params = list(self.model.au_encoder.parameters()) + list(self.model.phys_encoder.parameters())
+        encoder_param_ids = {id(p) for p in encoder_params}
+        other_params = [p for p in self.parameters() if id(p) not in encoder_param_ids]
+
+        trainable_encoder_params = [p for p in encoder_params if p.requires_grad]
+
+        param_groups = [
+            {"params": other_params, "lr": self.hparams.lr},
+        ]
+        if trainable_encoder_params:
+            param_groups.append(
+                {"params": trainable_encoder_params, "lr": self.hparams.encoder_lr},
+            )
+
         optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=self.hparams.lr,
+            param_groups,
             weight_decay=self.hparams.weight_decay
         )
         scheduler = CosineAnnealingLR(optimizer, T_max=self.hparams.T_max, eta_min=1e-6)

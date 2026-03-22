@@ -129,12 +129,12 @@ def train(
 
     typer.echo(f"Trainable layers ({len(trainable_layers)}):")
     checkpoint_callback = ModelCheckpoint(
-        dirpath='checkpoints/',       
-        filename='best-{epoch:02d}-{val_auc:.4f}', 
-        monitor='val_auc',            
-        mode='max',                   
-        save_top_k=2,                 
-        save_last=True,               
+        dirpath='checkpoints/',
+        filename='best-{epoch:02d}-{val_auc:.4f}',
+        monitor='val_auc',
+        mode='max',
+        save_top_k=2,
+        save_last=True,
         verbose=True
     )
 
