@@ -6,7 +6,7 @@ from src.backbones.rPPGToolbox.neural_methods.model.PhysNet import PhysNet_paddi
 class RPPGEncoder(PhysNet):
     def __init__(self, frames=128):
         super(RPPGEncoder, self).__init__(frames=frames)
-        self.out_channels = 64
+        self.out_channels = self.ConvBlock10.in_channels
 
     def load_pretrained(self, checkpoint_path):
         if not os.path.exists(checkpoint_path):

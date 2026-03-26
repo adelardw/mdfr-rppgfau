@@ -12,7 +12,7 @@ from src.data.transforms import VideoTransform
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
-
+                
 load_dotenv()
 
 @app.command()
@@ -126,17 +126,19 @@ def train(
     for name, param in lit_model.model.named_parameters():
         if param.requires_grad:
             trainable_layers.append(name)
+        else:
+            print(f'ПУПУПУУУУ ХУЕТА: {name, param.requires_grad}')
 
     typer.echo(f"Trainable layers ({len(trainable_layers)}):")
-    checkpoint_callback = ModelCheckpoint(
-        dirpath='checkpoints/',
-        filename='best-{epoch:02d}-{val_auc:.4f}',
-        monitor='val_auc',
-        mode='max',
-        save_top_k=2,
-        save_last=True,
-        verbose=True
-    )
+    #checkpoint_callback = ModelCheckpoint(
+    #    dirpath='checkpoints/',
+    #    filename='best-{epoch:02d}-{val_auc:.4f}',
+    #    monitor='val_auc',
+    #    mode='max',
+    #    save_top_k=1,
+    #    save_last=True,
+    #    verbose=True
+    #)
 
 
     early_stop_callback = EarlyStopping(
@@ -148,9 +150,9 @@ def train(
     )
     
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
-    callbacks = [checkpoint_callback, early_stop_callback, lr_monitor]
+    callbacks = [early_stop_callback, lr_monitor]
     
-    trainer = pl.Trainer(callbacks=callbacks,
+    trainer = pl.Trainer(callbacks=callbacks,strategy="ddp_find_unused_parameters_true",
                          **trainer_cfg)
     typer.echo("🚀 Запуск обучения Lightning...")
     trainer.fit(lit_model, train_dataloaders=train_loader, val_dataloaders=val_loader,

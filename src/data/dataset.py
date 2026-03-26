@@ -65,10 +65,9 @@ class VideoFolderDataset(Dataset):
         self.samples = []
         self.classes = []
         self.class_to_idx = {}
-
         if not os.path.exists(root_dir):
             raise FileNotFoundError(f"Folder {root_dir} not found")
-        subdirs = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
+        subdirs = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d)) if d !='captions'])
         for idx, class_name in enumerate(subdirs):
             self.classes.append(class_name)
             self.class_to_idx[class_name] = idx
@@ -192,7 +191,10 @@ if __name__ == "__main__":
     
     root_path = "/mnt/tank/scratch/dstoronkin/ff++_videos_out"
 
-
+    import json
+    jsonn = '/mnt/tank/scratch/dstoronkin/ff++_videos_out/captions/results.json'
+    
+    #print(json.load(open(jsonn)))
     full_dataset = VideoFolderDataset(root_path, transform=data_transforms)
 
     print(f"Classes: {full_dataset.classes}")

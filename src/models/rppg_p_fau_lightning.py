@@ -15,9 +15,9 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
     def __init__(
         self,
         model_params: dict,
-        lr: float = 1e-4,
+        lr: float = 1e-5,
         encoder_lr: float = 1e-5,
-        weight_decay: float = 1e-4,
+        weight_decay: float = 1e-3,
         T_max: int = 10,
         num_classes: int = 2
     ):
@@ -115,7 +115,7 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
             param_groups,
             weight_decay=self.hparams.weight_decay
         )
-        scheduler = CosineAnnealingLR(optimizer, T_max=self.hparams.T_max, eta_min=1e-6)
+        scheduler = CosineAnnealingLR(optimizer, T_max=self.hparams.T_max, eta_min=1e-8)
 
         return {
             "optimizer": optimizer,
