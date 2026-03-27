@@ -24,9 +24,9 @@ def train(
     ),
     num_workers: int = typer.Option(4, '--num_workers', "-nw",help='Кол-во воркеров для лоадеров'),
     dataset_paths: List[str] = typer.Option(
-        ..., 
-        "--dataset_path", "-d", 
-        help="Пути к папкам с датасетами (можно указывать несколько раз)"
+        ...,
+        "--dataset_path", "-d",
+        help="Пути к папкам с датасетами (через запятую или несколько -d)"
     ),
     batch_size: int = typer.Option(32, "--batch_size", "-bs",
                                    help='Размер батча'),
@@ -35,7 +35,24 @@ def train(
 ):
     """
     Запуск обучения модели FauRPPGDeepFakeRecognizer на нескольких датасетах.
+
+    Примеры:
+        -d /path1,/path2,/path3
+        -d /path1 -d /path2 -d /path3
     """
+
+    # Поддержка comma-separated путей: "-d /path1,/path2" -> ["/path1", "/path2"]
+    expanded_paths = []
+    for p in dataset_paths:
+        for part in p.split(","):
+            part = part.strip()
+            if part:
+                expanded_paths.append(part)
+    dataset_paths = expanded_paths
+
+    typer.echo(f"📋 Датасеты для обучения ({len(dataset_paths)}):")
+    for i, p in enumerate(dataset_paths):
+        typer.echo(f"   [{i+1}] {p}")
 
     if load_from_pretrain is not None:
         if not os.path.exists(load_from_pretrain):
