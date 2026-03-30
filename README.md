@@ -8,271 +8,464 @@
 
 MER is a research repository for **multimodal deepfake detection**. The model combines:
 
-- **FAU-based frame-level facial features**
-- **rPPG-based video-level physiological features**
-- **VideoMAE** as the main video backbone
-- **LoRA adaptation** for efficient fine-tuning
-- **Attention pooling + MLP head** for final binary classification (**REAL / FAKE**)
-
-The project is currently in an **early research stage**. The core model code is available, while some infrastructure parts such as full preprocessing, dataset-specific pipelines, and weight distribution are still being cleaned up.
+- **FAU-based frame-level facial features** (Swin Transformer + GNN)
+- **rPPG-based video-level physiological features** (PhysNet)
+- **Transformer Decoder (Q-Former)** for cross-modal fusion with learnable queries
+- **Attention Pooling + MLP head** for final binary classification (**REAL / FAKE**)
 
 ## Architecture
 
 ![MER architecture](docs/architecture.png)
 
-## DATASETS
-The model has been trained on two public deepfake datasets:
-1. FF++
-2. CelebDf
-
-Train: 1600 samples
-Validation: 200 samples
-
-### High-level idea
-
 The model processes a video through two complementary branches:
 
-1. **Frame-level branch** extracts facial action information from individual frames.
-2. **Video-level branch** extracts rPPG features that capture physiological consistency over time.
+1. **Frame-level branch (FAU):** Extracts facial action unit features from individual frames using a Swin-T backbone with a GNN module (MEGraphAU). Each AU receives its own temporal positional encoding, preserving per-AU temporal dynamics. A segment embedding (0) distinguishes FAU tokens.
 
-Both branches are projected into a shared representation space, enriched with special tokens and positional encoding, and then fused through a **VideoMAE backbone**. The final representation is aggregated by an **attention pooler** and passed to an **MLP classifier**.
+2. **Video-level branch (rPPG):** Extracts physiological signals (pulse-related variation) over the full video using PhysNet. Features are projected and enriched with sinusoidal positional encoding. A segment embedding (1) distinguishes rPPG tokens.
 
-This design is motivated by the idea that deepfakes may look visually plausible frame by frame, but often struggle to preserve:
+Both branches are concatenated and fed as **memory** into a **Transformer Decoder (Q-Former)** with 6 layers and 8 attention heads. A set of **32 learnable query embeddings** cross-attend to the multimodal tokens, producing a fused representation.
 
-- realistic facial dynamics,
-- temporal consistency,
-- physiological patterns such as pulse-related variation.
+The output queries are aggregated by an **Attention Pooler** (3-layer MLP with softmax-weighted averaging), passed through LayerNorm + Dropout, and classified by an **MLP head** into REAL or FAKE.
+
+### Key design choices
+
+- **Per-AU Temporal PE:** Each facial action unit gets its own temporal positional encoding trajectory, allowing the model to track temporal dynamics per AU independently.
+- **Segment embeddings:** Distinguish FAU tokens from rPPG tokens within the shared sequence.
+- **Q-Former fusion:** Learnable queries cross-attend to both modalities, letting the model discover which multimodal patterns are most discriminative.
+- **Frozen encoders (optional):** FAU and rPPG encoders can be frozen or fine-tuned (`full_train` flag).
+
+### Model parameters
+
+| Parameter | Value |
+|---|---|
+| FAU backbone | Swin Transformer Tiny |
+| rPPG backbone | PhysNet |
+| Embedding dim | 512 |
+| Num queries | 32 |
+| Decoder layers | 6 |
+| Attention heads | 8 |
+| Dropout | 0.3 |
+| Num AU classes | 12 |
+
+## Datasets
+
+The model has been trained and evaluated on three public deepfake datasets:
+
+| Dataset | Description |
+|---|---|
+| **FF++** (FaceForensics++) | Face-swapped videos with multiple manipulation methods |
+| **CelebDF** (Celeb-DeepFake) | High-quality celebrity deepfake videos |
+| **FAIGC** | AI-generated face content |
+
+Data split: 70% train / 15% val / 15% test (configurable).
+
+## Ablation Study — Cross-Dataset Evaluation
+
+Models trained on one dataset and evaluated on all three. Metrics: Accuracy / F1 (macro) / AUROC.
+
+### Accuracy
+
+| Train \ Test | FF++ | CelebDF | FAIGC |
+|---|:---:|:---:|:---:|
+| **FF++** | **0.8316** | 0.7616 | 0.5479 |
+| **CelebDF** | 0.6464 | **0.9342** | 0.4944 |
+| **FAIGC** | 0.4842 | 0.4875 | **0.9269** |
+| **Mix (all)** | 0.8057 | **0.9728** | **0.9131** |
+
+### F1 (macro)
+
+| Train \ Test | FF++ | CelebDF | FAIGC |
+|---|:---:|:---:|:---:|
+| **FF++** | **0.8622** | 0.7320 | 0.5489 |
+| **CelebDF** | 0.3914 | **0.9602** | 0.2585 |
+| **FAIGC** | 0.3140 | 0.1692 | **0.9055** |
+| **Mix (all)** | 0.8077 | **0.9809** | **0.9073** |
+
+### AUROC
+
+| Train \ Test | FF++ | CelebDF | FAIGC |
+|---|:---:|:---:|:---:|
+| **FF++** | **0.9758** | 0.8166 | 0.5768 |
+| **CelebDF** | 0.7538 | **0.9999** | 0.3458 |
+| **FAIGC** | 0.4497 | 0.5445 | **0.9799** |
+| **Mix (all)** | 0.9351 | **0.9981** | **0.9752** |
+
+### Full metrics per experiment
+
+<details>
+<summary>FF++ → FF++</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 0.1478 |
+| Accuracy | 0.8316 |
+| F1 (macro) | 0.8622 |
+| Precision | 0.9033 |
+| Recall | 0.8316 |
+| AUROC | 0.9758 |
+
+Per-class: crop_img acc=0.9807, f1=0.9634 | real acc=0.6825, f1=0.7611
+</details>
+
+<details>
+<summary>FF++ → CelebDF</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 0.3493 |
+| Accuracy | 0.7616 |
+| F1 (macro) | 0.7320 |
+| Precision | 0.7116 |
+| Recall | 0.7616 |
+| AUROC | 0.8166 |
+
+Per-class: crop_img acc=0.9049, f1=0.9238 | real acc=0.6184, f1=0.5402
+</details>
+
+<details>
+<summary>FF++ → FAIGC</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 1.2221 |
+| Accuracy | 0.5479 |
+| F1 (macro) | 0.5489 |
+| Precision | 0.5540 |
+| Recall | 0.5479 |
+| AUROC | 0.5768 |
+
+Per-class: fake acc=0.7828, f1=0.7551 | real acc=0.3130, f1=0.3427
+</details>
+
+<details>
+<summary>FAIGC → FAIGC</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 0.2047 |
+| Accuracy | 0.9269 |
+| F1 (macro) | 0.9055 |
+| Precision | 0.8915 |
+| Recall | 0.9269 |
+| AUROC | 0.9799 |
+
+Per-class: fake acc=0.9028, f1=0.9387 | real acc=0.9511, f1=0.8722
+</details>
+
+<details>
+<summary>FAIGC → FF++</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 2.3390 |
+| Accuracy | 0.4842 |
+| F1 (macro) | 0.3140 |
+| Precision | 0.4896 |
+| Recall | 0.4842 |
+| AUROC | 0.4497 |
+
+Per-class: crop_img acc=0.2541, f1=0.3898 | real acc=0.7143, f1=0.2381
+</details>
+
+<details>
+<summary>FAIGC → CelebDF</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 2.7093 |
+| Accuracy | 0.4875 |
+| F1 (macro) | 0.1692 |
+| Precision | 0.4792 |
+| Recall | 0.4875 |
+| AUROC | 0.5445 |
+
+Per-class: crop_img acc=0.0672, f1=0.1244 | real acc=0.9079, f1=0.2140
+</details>
+
+<details>
+<summary>CelebDF → FF++</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 3.2892 |
+| Accuracy | 0.6464 |
+| F1 (macro) | 0.3914 |
+| Precision | 0.5987 |
+| Recall | 0.6464 |
+| AUROC | 0.7538 |
+
+Per-class: crop_img acc=0.2928, f1=0.4530 | real acc=1.0000, f1=0.3298
+</details>
+
+<details>
+<summary>CelebDF → CelebDF</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 0.0446 |
+| Accuracy | 0.9342 |
+| F1 (macro) | 0.9602 |
+| Precision | 0.9908 |
+| Recall | 0.9342 |
+| AUROC | 0.9999 |
+
+Per-class: crop_img acc=1.0000, f1=0.9908 | real acc=0.8684, f1=0.9296
+</details>
+
+<details>
+<summary>CelebDF → FAIGC</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 3.8568 |
+| Accuracy | 0.4944 |
+| F1 (macro) | 0.2585 |
+| Precision | 0.4681 |
+| Recall | 0.4944 |
+| AUROC | 0.3458 |
+
+Per-class: fake acc=0.0352, f1=0.0667 | real acc=0.9535, f1=0.4503
+</details>
+
+<details>
+<summary>Mix (all) → FF++</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 0.2222 |
+| Accuracy | 0.8057 |
+| F1 (macro) | 0.8077 |
+| Precision | 0.8098 |
+| Recall | 0.8057 |
+| AUROC | 0.9351 |
+
+Per-class: crop_img acc=0.9448, f1=0.9434 | real acc=0.6667, f1=0.6720
+</details>
+
+<details>
+<summary>Mix (all) → CelebDF</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 0.0368 |
+| Accuracy | 0.9728 |
+| F1 (macro) | 0.9809 |
+| Precision | 0.9894 |
+| Recall | 0.9728 |
+| AUROC | 0.9981 |
+
+Per-class: crop_img acc=0.9981, f1=0.9953 | real acc=0.9474, f1=0.9664
+</details>
+
+<details>
+<summary>Mix (all) → FAIGC</summary>
+
+| Metric | Value |
+|---|---:|
+| Loss | 0.1849 |
+| Accuracy | 0.9131 |
+| F1 (macro) | 0.9073 |
+| Precision | 0.9022 |
+| Recall | 0.9131 |
+| AUROC | 0.9752 |
+
+Per-class: fake acc=0.9338, f1=0.9436 | real acc=0.8924, f1=0.8711
+</details>
+
+### Observations
+
+- Each model achieves strong in-domain performance (0.83–0.93 accuracy).
+- Single-dataset models generalize poorly to unseen domains — FAIGC and CelebDF in particular have very different artifact distributions.
+- **FF++** model generalizes reasonably to CelebDF (0.76 acc, 0.82 AUROC) but fails on FAIGC (0.55 acc).
+- **Mix training** (FF++ + CelebDF + FAIGC) achieves the best overall generalization across all three domains: 0.81/0.97/0.91 accuracy and 0.94/0.998/0.975 AUROC respectively.
+- The gap between Mix and single-dataset on CelebDF is especially large: 0.97 vs 0.93 (CelebDF-only).
 
 ## Repository structure
 
 ```text
 src/
-  backbones/      # external and custom backbones
   models/         # model definitions
-  config/         # training configs (to be finalized)
-  ...
+  backbones/      # FAU (MEGraphAU) and rPPG (PhysNet) backbones
+  data/           # dataset classes and transforms
+  config/         # training configs
+  experiments/    # experiment configs (YAML)
+  train.py        # training entrypoint
+  eval.py         # GradCAM visualization
 ```
-
-### Main directories
-
-- `src/models` — model implementations
-- `src/config` — training configurations
-- `src/backbones` — model backbones and external dependencies
-- preprocessing — planned as a separate module and still under cleanup
 
 ## Setup
 
 ### 1. Environment
 
-Run:
-
 ```bash
 bash env.sh
 ```
 
-This script prepares the environment and installs the required dependencies.
-
 ### 2. FAU weights
 
-FAU weights must be downloaded separately.
-
-At the moment this is not fully automated. A proper storage location and download script are planned.
+Download separately and place at:
+```text
+src/backbones/MEGraphAU/checkpoints/MEFARG_swin_tiny_BP4D_fold1.pth
+```
 
 ### 3. rPPG weights
 
-Weights for the rPPG branch come from the original **rPPG-Toolbox** repository and are expected under:
-
+Weights from the [rPPG-Toolbox](https://github.com/ubicomplab/rPPG-Toolbox) repository:
 ```text
-src/backbones/rPPGToolbox/final_model_release
+src/backbones/rPPGToolbox/final_model_release/PURE_PhysNet_DiffNormalized.pth
 ```
 
 ## Training
 
 Training is implemented in **PyTorch Lightning**.
 
-Current assumptions:
+```bash
+python src/train.py --config src/experiments/base_config.yml --data_dir <path_to_dataset>
+```
 
-- the exact training entrypoint depends on the dataset format,
-- preprocessing is partly project-specific,
-- configs are being organized and documented.
-
-In practice, the training logic is built around Lightning modules and can be adapted once the dataset interface is fixed.
-
-## Current status
-
-What is already available:
-
-- core model code
-- multimodal architecture
-- training logic in Lightning style
-- validation metrics and experimental runs
-
-What is still being cleaned up:
-
-- preprocessing module
-- config documentation
-- automatic download of external weights
-- dataset-specific training instructions
-- reproducible end-to-end setup
+Key training parameters:
+- Optimizer: AdamW (lr=1e-4 main, lr=1e-5 encoders)
+- Scheduler: CosineAnnealingLR
+- Early stopping on `val_auc` (patience=15)
+- Gradient accumulation: 2 batches
+- Max epochs: 1000
 
 ## Notes
 
-- This repository is intended primarily as a **research codebase**, not yet as a polished production package.
-- Some components depend on external model weights and internal dataset conventions.
-- The codebase is being gradually refactored into a more reproducible public version.
+- This is a **research codebase**, not a production package.
+- Some components depend on external model weights.
+- The architecture diagram source is available at `docs/architecture.drawio`.
 
 ## Citation
 
-If you use this repository, please cite the project page or contact the author directly until a formal paper or technical report is released.
+If you use this repository, please cite the project page or contact the author directly.
 
 ---
 
 ## Русский
 
-MER — это исследовательский репозиторий для задачи **детекции дипфейков на основе мультимодальных признаков**. Модель объединяет:
+MER — исследовательский репозиторий для задачи **детекции дипфейков на основе мультимодальных признаков**. Модель объединяет:
 
-- **FAU-признаки на уровне кадров**
-- **rPPG-признаки на уровне видео**
-- **VideoMAE** в качестве основного видеобэкбона
-- **LoRA-адаптацию** для эффективного дообучения
-- **attention pooling + MLP head** для итоговой бинарной классификации (**REAL / FAKE**)
-
-Проект находится на **ранней исследовательской стадии**. Основной код модели уже есть, но часть инфраструктуры — например, полный препроцессинг, пайплайны под конкретные датасеты и распространение весов — ещё приводится в порядок.
+- **FAU-признаки на уровне кадров** (Swin Transformer + GNN)
+- **rPPG-признаки на уровне видео** (PhysNet)
+- **Transformer Decoder (Q-Former)** для кросс-модального слияния с обучаемыми запросами
+- **Attention Pooling + MLP head** для бинарной классификации (**REAL / FAKE**)
 
 ## Архитектура
 
 ![Архитектура MER](docs/architecture.png)
 
+Модель обрабатывает видео через две ветки:
+
+1. **Ветка уровня кадров (FAU):** Извлекает признаки единиц действия лица (Action Units) из отдельных кадров с помощью Swin-T и графовой нейросети (MEGraphAU). Каждый AU получает собственное временное позиционное кодирование для отслеживания динамики. Сегментное вложение (0) помечает FAU-токены.
+
+2. **Ветка уровня видео (rPPG):** Извлекает физиологические сигналы (вариации пульса) по всему видео с помощью PhysNet. Признаки проецируются и дополняются синусоидальным позиционным кодированием. Сегментное вложение (1) помечает rPPG-токены.
+
+Обе ветки конкатенируются и подаются как **memory** в **Transformer Decoder (Q-Former)** с 6 слоями и 8 головами внимания. **32 обучаемых запроса (queries)** выполняют кросс-внимание к мультимодальным токенам, формируя объединённое представление.
+
+Выходные запросы агрегируются **Attention Pooler** (3-слойный MLP с softmax-взвешиванием), проходят через LayerNorm + Dropout и классифицируются **MLP-головой** в REAL или FAKE.
+
+### Ключевые решения
+
+- **Per-AU Temporal PE:** Каждая единица действия лица получает собственную траекторию позиционного кодирования.
+- **Сегментные вложения:** Различают FAU-токены и rPPG-токены в общей последовательности.
+- **Q-Former слияние:** Обучаемые запросы выполняют кросс-внимание к обеим модальностям.
+- **Заморозка энкодеров (опционально):** FAU и rPPG энкодеры могут быть заморожены или дообучены (флаг `full_train`).
+
 ## Датасеты
-Модель была обучена на 2 датасетах:
-1. FF++
-2. CelebDf
 
-Тренировочный набор: 1600 примеров
-Валидационный набор: 200 примеров
+Модель обучена и протестирована на трёх датасетах:
 
-### Общая идея
+| Датасет | Описание |
+|---|---|
+| **FF++** (FaceForensics++) | Face-swap видео с несколькими методами манипуляции |
+| **CelebDF** (Celeb-DeepFake) | Высококачественные дипфейки знаменитостей |
+| **FAIGC** | AI-генерированный контент с лицами |
 
-Модель обрабатывает видео через две взаимодополняющие ветки:
+Разбиение: 70% train / 15% val / 15% test (настраивается).
 
-1. **Ветка уровня кадров** извлекает признаки лицевой динамики из отдельных кадров.
-2. **Ветка уровня видео** извлекает rPPG-признаки, отражающие физиологическую согласованность сигнала во времени.
+## Ablation Study — Кросс-датасетная оценка
 
-Далее обе ветки проецируются в общее пространство представлений, обогащаются специальными токенами и позиционным кодированием, после чего объединяются через **VideoMAE backbone**. Итоговое представление агрегируется с помощью **attention pooler** и передаётся в **MLP-классификатор**.
+Модели обучены на одном датасете и протестированы на всех трёх. Метрики: Accuracy / F1 (macro) / AUROC.
 
-Идея архитектуры основана на том, что дипфейки могут выглядеть правдоподобно на уровне отдельных кадров, но часто хуже сохраняют:
+### Accuracy
 
-- реалистичную лицевую динамику,
-- временную согласованность,
-- физиологические паттерны, например вариации, связанные с пульсом.
+| Обучение \ Тест | FF++ | CelebDF | FAIGC |
+|---|:---:|:---:|:---:|
+| **FF++** | **0.8316** | 0.7616 | 0.5479 |
+| **CelebDF** | 0.6464 | **0.9342** | 0.4944 |
+| **FAIGC** | 0.4842 | 0.4875 | **0.9269** |
+| **Смесь (все)** | 0.8057 | **0.9728** | **0.9131** |
 
-## Структура репозитория
+### F1 (macro)
 
-```text
-src/
-  backbones/      # внешние и кастомные бэкбоны
-  models/         # определения моделей
-  config/         # конфиги обучения (будут дооформлены)
-  ...
-```
+| Обучение \ Тест | FF++ | CelebDF | FAIGC |
+|---|:---:|:---:|:---:|
+| **FF++** | **0.8622** | 0.7320 | 0.5489 |
+| **CelebDF** | 0.3914 | **0.9602** | 0.2585 |
+| **FAIGC** | 0.3140 | 0.1692 | **0.9055** |
+| **Смесь (все)** | 0.8077 | **0.9809** | **0.9073** |
 
-### Основные директории
+### AUROC
 
-- `src/models` — реализации моделей
-- `src/config` — конфигурации обучения
-- `src/backbones` — бэкбоны и внешние зависимости
-- preprocessing — планируется как отдельный модуль и пока ещё дорабатывается
+| Обучение \ Тест | FF++ | CelebDF | FAIGC |
+|---|:---:|:---:|:---:|
+| **FF++** | **0.9758** | 0.8166 | 0.5768 |
+| **CelebDF** | 0.7538 | **0.9999** | 0.3458 |
+| **FAIGC** | 0.4497 | 0.5445 | **0.9799** |
+| **Смесь (все)** | 0.9351 | **0.9981** | **0.9752** |
+
+### Наблюдения
+
+- Каждая модель показывает высокие результаты на своём домене (0.83–0.93 accuracy).
+- Модели, обученные на одном датасете, плохо переносятся на другие домены — особенно FAIGC и CelebDF имеют очень разные распределения артефактов.
+- Модель **FF++** более-менее переносится на CelebDF (0.76 acc, 0.82 AUROC), но плохо работает на FAIGC (0.55 acc).
+- **Обучение на смеси** (FF++ + CelebDF + FAIGC) даёт наилучшую генерализацию по всем трём доменам: 0.81 / 0.97 / 0.91 по accuracy и 0.94 / 0.998 / 0.975 по AUROC.
+- Разрыв между смесью и одиночным CelebDF особенно заметен: 0.97 vs 0.93 при тестировании на CelebDF.
 
 ## Установка
 
 ### 1. Окружение
 
-Запуск:
-
 ```bash
 bash env.sh
 ```
 
-Этот скрипт подготавливает окружение и устанавливает зависимости.
-
 ### 2. Веса FAU
 
-Веса для FAU необходимо скачать отдельно.
-
-Сейчас этот процесс ещё не полностью автоматизирован. В дальнейшем для них стоит добавить нормальное хранилище и отдельный скрипт скачивания.
+Скачать и поместить в:
+```text
+src/backbones/MEGraphAU/checkpoints/MEFARG_swin_tiny_BP4D_fold1.pth
+```
 
 ### 3. Веса rPPG
 
-Веса для rPPG-ветки берутся из исходного репозитория **rPPG-Toolbox** и ожидаются по пути:
-
+Веса из репозитория [rPPG-Toolbox](https://github.com/ubicomplab/rPPG-Toolbox):
 ```text
-src/backbones/rPPGToolbox/final_model_release
+src/backbones/rPPGToolbox/final_model_release/PURE_PhysNet_DiffNormalized.pth
 ```
 
 ## Обучение
 
 Обучение реализовано на **PyTorch Lightning**.
 
-Текущие допущения:
+```bash
+python src/train.py --config src/experiments/base_config.yml --data_dir <путь_к_датасету>
+```
 
-- точка входа в обучение зависит от формата датасета,
-- препроцессинг частично завязан на конкретные данные,
-
-На практике логика обучения уже построена вокруг Lightning-модулей и может быть адаптирована после фиксации интерфейса данных.
-
-## Текущее состояние
-
-Что уже есть:
-
-- основной код модели
-- мультимодальная архитектура
-- логика обучения в стиле Lightning
-- валидационные метрики и экспериментальные прогоны
-
-Что ещё нужно дооформить:
-
-- модуль препроцессинга
-- документацию по конфигам
-- автоматическую загрузку внешних весов
-- инструкции по обучению под конкретные датасеты
-- воспроизводимый end-to-end setup
+Основные параметры:
+- Оптимизатор: AdamW (lr=1e-4 основной, lr=1e-5 энкодеры)
+- Планировщик: CosineAnnealingLR
+- Early stopping по `val_auc` (patience=15)
+- Gradient accumulation: 2 батча
+- Макс. эпох: 1000
 
 ## Примечания
 
-- Репозиторий в первую очередь задуман как **исследовательский код**, а не как полностью отполированный production-пакет.
-- Некоторые компоненты зависят от внешних весов моделей и внутренних соглашений по датасетам.
-- Кодовая база постепенно приводится к более воспроизводимой публичной версии.
+- Это **исследовательский код**, а не production-пакет.
+- Некоторые компоненты зависят от внешних весов моделей.
+- Исходник диаграммы архитектуры: `docs/architecture.drawio`.
 
 ## Цитирование
 
-Если вы используете этот репозиторий, пожалуйста, ссылайтесь на страницу проекта или свяжитесь с автором напрямую, пока не будет опубликована статья или технический отчёт.
-
-
-#### Best Checkpoint
-
-| Metric Name | Metric Value |
-|---|---:|
-| Validation Accuracy | ~0.64 |
-| Validation AUC | ~0.69 |
-| Validation F1 | ~0.62 |
-| Validation Loss | ~0.65 |
-
-
-#### Validation Curves
-
-**Validation Accuracy**
-
-![Validation Accuracy](docs/val_acc.png)
-
-**Validation AUC**
-
-![Validation AUC](docs/val_auc.png)
-
-**Validation F1**
-
-![Validation F1](docs/val_f1.png)
-
-**Validation Loss**
-
-![Validation Loss](docs/val_loss.png)
-
+Если вы используете этот репозиторий, ссылайтесь на страницу проекта или свяжитесь с автором.
