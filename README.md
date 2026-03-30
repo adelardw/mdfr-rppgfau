@@ -63,6 +63,8 @@ Data split: 70% train / 15% val / 15% test (configurable).
 
 Models trained on one dataset and evaluated on all three. Metrics: Accuracy / F1 (macro) / AUROC.
 
+> **Methodological note:** All results are reported on the **val split** (10% of the target dataset, random seed=42). For in-domain experiments the checkpoint was selected via early stopping on this same val split, which introduces a mild optimistic bias (standard practice). For cross-dataset experiments the remaining 90% of the target dataset is unused — evaluation is based on ~600–1400 samples depending on the dataset size, which is sufficient for stable estimates but should be kept in mind when interpreting small differences between numbers.
+
 ### Accuracy
 
 | Train \ Test | FF++ | CelebDF | FAIGC |
@@ -387,6 +389,8 @@ MER — исследовательский репозиторий для зад�
 ## Ablation Study — Кросс-датасетная оценка
 
 Модели обучены на одном датасете и протестированы на всех трёх. Метрики: Accuracy / F1 (macro) / AUROC.
+
+> **Методологическое примечание:** Все результаты получены на **val split** (10% целевого датасета, random seed=42). Для in-domain экспериментов чекпоинт выбирался через early stopping на этом же val split — это вносит лёгкий оптимистичный bias (стандартная практика). Для cross-dataset экспериментов оставшиеся 90% целевого датасета не используются — оценка основана на ~600–1400 примерах в зависимости от датасета, чего достаточно для стабильных оценок, но стоит учитывать при интерпретации небольших расхождений между числами.
 
 ### Accuracy
 
