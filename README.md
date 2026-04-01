@@ -1,4 +1,4 @@
-# MER — Multimodal Deepfake Detection
+# MER — Multimodal Emotional Recognition
 
 [English](#english) | [Русский](#русский)
 
