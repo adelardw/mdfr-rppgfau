@@ -1,4 +1,4 @@
-# MER — Multimodal Emotional Recognition
+# MDFr-rPPGpFAU - multimodal deepfake recognition based on rppg (video) and fau (image) encoders.
 
 [English](#english) | [Русский](#русский)
 
@@ -6,7 +6,7 @@
 
 ## English
 
-MER is a research repository for **multimodal deepfake detection**. The model combines:
+MDF is a research repository for **multimodal deepfake detection**. The model combines:
 
 - **FAU-based frame-level facial features** (Swin Transformer + GNN)
 - **rPPG-based video-level physiological features** (PhysNet)
@@ -15,7 +15,7 @@ MER is a research repository for **multimodal deepfake detection**. The model co
 
 ## Architecture
 
-![MER architecture](docs/architecture.png)
+![MDF architecture](docs/architecture.png)
 
 The model processes a video through two complementary branches:
 
@@ -346,7 +346,7 @@ If you use this repository, please cite the project page or contact the author d
 
 ## Русский
 
-MER — исследовательский репозиторий для задачи **детекции дипфейков на основе мультимодальных признаков**. Модель объединяет:
+MDF — исследовательский репозиторий для задачи **детекции дипфейков на основе мультимодальных признаков**. Модель объединяет:
 
 - **FAU-признаки на уровне кадров** (Swin Transformer + GNN)
 - **rPPG-признаки на уровне видео** (PhysNet)
@@ -355,7 +355,7 @@ MER — исследовательский репозиторий для зад�
 
 ## Архитектура
 
-![Архитектура MER](docs/architecture.png)
+![Архитектура MDF](docs/architecture.png)
 
 Модель обрабатывает видео через две ветки:
 
