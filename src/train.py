@@ -31,6 +31,11 @@ def train(
     batch_size: int = typer.Option(32, "--batch_size", "-bs",
                                    help='Размер батча'),
     
+    val_dataset_paths: Optional[List[str]] = typer.Option(
+        None,
+        "--val_dataset_path", "-vd",
+        help="Пути к папкам с датасетами для val/test (если не указано — используется тренировочный)"
+    ),
     load_from_pretrain: Optional[str] = typer.Option(None, "--load_from_pretrain", "-r", help="Путь к .ckpt файлу для возобновления")
 ):
     """
@@ -50,9 +55,26 @@ def train(
                 expanded_paths.append(part)
     dataset_paths = expanded_paths
 
+    # То же самое для val_dataset_paths
+    if val_dataset_paths:
+        expanded_val_paths = []
+        for p in val_dataset_paths:
+            for part in p.split(","):
+                part = part.strip()
+                if part:
+                    expanded_val_paths.append(part)
+        val_dataset_paths = expanded_val_paths
+
     typer.echo(f"📋 Датасеты для обучения ({len(dataset_paths)}):")
     for i, p in enumerate(dataset_paths):
         typer.echo(f"   [{i+1}] {p}")
+
+    if val_dataset_paths:
+        typer.echo(f"📋 Датасеты для val/test ({len(val_dataset_paths)}):")
+        for i, p in enumerate(val_dataset_paths):
+            typer.echo(f"   [{i+1}] {p}")
+    else:
+        typer.echo("📋 Val/test датасет: из тренировочного (по умолчанию)")
 
     if load_from_pretrain is not None:
         if not os.path.exists(load_from_pretrain):
@@ -100,12 +122,10 @@ def train(
     val_transform = VideoTransform(size=(224, 224), training=False)
 
     train_datasets = []
-    val_datasets = []
     for path in dataset_paths:
         if os.path.exists(path):
-            typer.echo(f"📦 Загрузка датасета из: {path}")
+            typer.echo(f"📦 Загрузка тренировочного датасета из: {path}")
             train_datasets.append(VideoFolderDataset(path, video_transform=train_transform, frames_per_video=num_frames))
-            val_datasets.append(VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames))
         else:
             typer.echo(f"⚠️ Путь не найден и будет пропущен: {path}")
 
@@ -113,16 +133,40 @@ def train(
         raise Exception("Ни один датасет не был загружен. Проверьте пути.")
 
     full_train_dataset = ConcatDataset(train_datasets)
-    full_val_dataset = ConcatDataset(val_datasets)
-
     base_classes = getattr(train_datasets[0], 'classes', 'Unknown')
     typer.echo(f"Classes (from first DS): {base_classes}")
-    typer.echo(f"Total videos: {len(full_train_dataset)}")
+    typer.echo(f"Total train videos: {len(full_train_dataset)}")
 
-    # Same seed → same split indices for both datasets
-    train_ds, _, _ = split_dataset(full_train_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
-    _, val_ds, test_ds = split_dataset(full_val_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
-    typer.echo(f"Split -> Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+    if val_dataset_paths:
+        # Отдельный датасет для val/test
+        val_datasets = []
+        for path in val_dataset_paths:
+            if os.path.exists(path):
+                typer.echo(f"📦 Загрузка val/test датасета из: {path}")
+                val_datasets.append(VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames))
+            else:
+                typer.echo(f"⚠️ Путь не найден и будет пропущен: {path}")
+
+        if not val_datasets:
+            raise Exception("Ни один val/test датасет не был загружен. Проверьте пути.")
+
+        full_val_dataset = ConcatDataset(val_datasets)
+        typer.echo(f"Total val/test videos: {len(full_val_dataset)}")
+
+        train_ds = full_train_dataset
+        val_ds, test_ds, _ = split_dataset(full_val_dataset, train_ratio=0.5, val_ratio=0.5, test_ratio=0.0)
+        typer.echo(f"Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+    else:
+        # Val/test из тренировочного датасета
+        full_val_dataset = ConcatDataset([
+            VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames)
+            for path in dataset_paths if os.path.exists(path)
+        ])
+
+        # Same seed → same split indices for both datasets
+        train_ds, _, _ = split_dataset(full_train_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
+        _, val_ds, test_ds = split_dataset(full_val_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
+        typer.echo(f"Split -> Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
                               pin_memory=True,
