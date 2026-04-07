@@ -1,0 +1,19 @@
+model_params:
+  num_frames: 32
+  phys_ckpt_path: ./src/backbones/rPPGToolbox/final_model_release/PURE_PhysNet_DiffNormalized.pth
+  num_classes: 2
+  dropout: 0.3
+  embed_dim: 512
+  full_train: true
+
+train_params:
+  lr: 0.0001
+  encoder_lr: 0.00001
+  weight_decay: 0.05
+  T_max: 100
+  num_classes: 2
+
+trainer_params:
+  max_epochs: 1000
+  accumulate_grad_batches: 2
+  accelerator: auto
