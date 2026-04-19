@@ -1,7 +1,7 @@
 import typer
 from pathlib import Path
 from omegaconf import OmegaConf
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 import os
 import lightning as pl
 from typing import List, Optional
@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from src.models.rppg_p_fau_lightning import FauRPPGDeepFakeRecognizer
 from src.data.dataset import VideoFolderDataset, split_dataset
 from src.data.transforms import VideoTransform
+from src.data.processor import FaceDetector, Processor
+from src.data.split import concat_cluster_split
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
@@ -118,8 +120,15 @@ def train(
     num_frames = model_cfg['num_frames']
     typer.echo(f"📐 num_frames={num_frames}")
 
-    train_transform = VideoTransform(size=(224, 224), training=True)
-    val_transform = VideoTransform(size=(224, 224), training=False)
+    detector = FaceDetector(margin=20, device="cpu")
+    train_transform = Processor(
+        transform=VideoTransform(size=(224, 224), training=True),
+        detector=detector,
+    )
+    val_transform = Processor(
+        transform=VideoTransform(size=(224, 224), training=False),
+        detector=detector,
+    )
 
     train_datasets = []
     for path in dataset_paths:
@@ -157,16 +166,20 @@ def train(
         val_ds, test_ds, _ = split_dataset(full_val_dataset, train_ratio=0.5, val_ratio=0.5, test_ratio=0.0)
         typer.echo(f"Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
     else:
-        # Val/test из тренировочного датасета
         full_val_dataset = ConcatDataset([
             VideoFolderDataset(path, video_transform=val_transform, frames_per_video=num_frames)
             for path in dataset_paths if os.path.exists(path)
         ])
 
-        # Same seed → same split indices for both datasets
-        train_ds, _, _ = split_dataset(full_train_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
-        _, val_ds, test_ds = split_dataset(full_val_dataset, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
-        typer.echo(f"Split -> Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+        typer.echo("🔍 Running cluster-based split (KMeans on visual features)…")
+        train_idx, val_idx, test_idx = concat_cluster_split(
+            train_datasets, n_clusters=3, seed=42, n_feature_frames=4
+        )
+
+        train_ds = Subset(full_train_dataset, train_idx)
+        val_ds   = Subset(full_val_dataset,   val_idx)
+        test_ds  = Subset(full_val_dataset,   test_idx)
+        typer.echo(f"Cluster split → Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
                               pin_memory=True,
@@ -209,10 +222,10 @@ def train(
         verbose=True,
         mode='max'
     )
-    
+
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     callbacks = [early_stop_callback, lr_monitor]
-    
+
     trainer = pl.Trainer(callbacks=callbacks,strategy="ddp_find_unused_parameters_true",
                          **trainer_cfg)
     typer.echo("🚀 Запуск обучения Lightning...")
