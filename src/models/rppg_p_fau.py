@@ -23,7 +23,10 @@ class DeepfakeDetector(nn.Module):
                  num_decoder_layers: int = 6,
                  nhead: int = 8,
                  dropout: float = 0.1,
-                 full_train: bool = False):
+                 full_train: bool = False,
+                 num_gender_classes: int = 0,
+                 num_ethnicity_classes: int = 0,
+                 num_emotion_classes: int = 0):
         super().__init__()
 
         self.au_encoder = FAUEncoder(num_classes=num_au_classes, backbone=backbone_fau)
@@ -59,7 +62,12 @@ class DeepfakeDetector(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(embed_dim, num_classes)
 
-    def forward(self, x_video, return_info=False):
+        # Auxiliary heads for multi-task learning (disabled when num_X_classes == 0)
+        self.gender_head = nn.Linear(embed_dim, num_gender_classes) if num_gender_classes > 0 else None
+        self.ethnicity_head = nn.Linear(embed_dim, num_ethnicity_classes) if num_ethnicity_classes > 0 else None
+        self.emotion_head = nn.Linear(embed_dim, num_emotion_classes) if num_emotion_classes > 0 else None
+
+    def forward(self, x_video, return_info=True):
         """
         x_video: [B, 3, T, 224, 224]
         """
@@ -93,17 +101,25 @@ class DeepfakeDetector(nn.Module):
 
         # === Aggregation + classification ===
         features, attn_weights = self.attn_pooler(decoded_queries)
-        logits = self.classifier(self.dropout(self.norm(features)))
+        normed = self.dropout(self.norm(features))
+        logits = self.classifier(normed)
 
         if return_info:
-            return {
+            out = {
                 "logits": logits,
                 "attn_weights": attn_weights,
                 "au_embeddings": tokens_au.detach(),
                 "phys_embeddings": tokens_phys.detach(),
                 "au_logits": cl.detach(),
-                "rPPG": rPPG.detach()
+                "rPPG": rPPG.detach(),
             }
+            if self.gender_head is not None:
+                out["gender_logits"] = self.gender_head(normed)
+            if self.ethnicity_head is not None:
+                out["ethnicity_logits"] = self.ethnicity_head(normed)
+            if self.emotion_head is not None:
+                out["emotion_logits"] = self.emotion_head(normed)
+            return out
         return logits
 
 

@@ -11,17 +11,19 @@ model_params:
   num_decoder_layers: 6
   nhead: 8
   full_train: true
-  # Auxiliary heads (0 = disabled; set > 0 to enable the head)
-  num_gender_classes: 0
-  num_ethnicity_classes: 0
-  num_emotion_classes: 0
+  # Auxiliary heads — actual class counts from train_meta_v5.csv
+  # gender:    Male / Female                                          → 2
+  # ethnicity: Asian / Black / Indian / Latino or Middle Eastern / White → 5
+  # emotion:   Anger / Contempt / Disgust / Fear / Happiness / Neutral / Sadness / Surprise → 8
+  num_gender_classes: 2
+  num_ethnicity_classes: 5
+  num_emotion_classes: 8
 
 train_params:
   lr: 0.0001
   weight_decay: 0.05
   T_max: 100
   num_classes: 2
-  # Loss weights for auxiliary multi-task heads (only used when the head is enabled)
   gender_loss_weight: 0.3
   ethnicity_loss_weight: 0.3
   emotion_loss_weight: 0.3
