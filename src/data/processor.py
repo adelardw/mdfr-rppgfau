@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import warnings
-from typing import List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import torch
+from torchvision.transforms import functional as TF
 from PIL import Image
 
-from src.data.transforms import VideoTransform
-
 Box = Tuple[int, int, int, int]  # (x1, y1, x2, y2)
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD  = [0.229, 0.224, 0.225]
+
+
+def _frames_to_tensor(frames: List[Image.Image]) -> torch.Tensor:
+    """Default tensorization: PIL list → ImageNet-normalized [C, T, H, W]."""
+    tensors = [TF.normalize(TF.to_tensor(f), mean=IMAGENET_MEAN, std=IMAGENET_STD)
+               for f in frames]
+    return torch.stack(tensors).permute(1, 0, 2, 3)
 
 
 class FaceDetector:
@@ -47,10 +56,6 @@ class FaceDetector:
             )
             self._mtcnn = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def detect_batch(self, frames: List[Image.Image]) -> List[Optional[Box]]:
         """
         Detect one face per frame in a single batched forward pass.
@@ -63,7 +68,6 @@ class FaceDetector:
 
         try:
             boxes_batch, _ = self._mtcnn.detect(frames)
-            # facenet-pytorch returns a list when input is a list
             if not isinstance(boxes_batch, (list, tuple)):
                 boxes_batch = [boxes_batch]
         except Exception:
@@ -86,10 +90,6 @@ class FaceDetector:
 
         return results
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _center_crop_box(frame: Image.Image, ratio: float = 0.8) -> Box:
         w, h = frame.size
@@ -98,49 +98,99 @@ class FaceDetector:
         return (cx - side // 2, cy - side // 2, cx + side // 2, cy + side // 2)
 
 
+# ---------------------------------------------------------------------------
+# Processor
+# ---------------------------------------------------------------------------
+
 class Processor:
     """
-    Video processing pipeline: face detection → consistent augmentation.
+    Video processing pipeline: optional face detection → any video-level transform.
 
-    Replaces VideoTransform as the ``video_transform`` argument of
-    VideoFolderDataset, keeping the same call signature::
+    ``transform`` can be **any callable** that accepts ``List[PIL.Image]``::
 
-        tensor = processor(frames)  # frames: List[PIL.Image], tensor: [C,T,H,W]
+        # VideoTransform (built-in)
+        Processor(transform=VideoTransform(size=(224, 224), training=True),
+                  detector=FaceDetector(margin=20))
 
-    Detection is applied first so augmentations work on already-cropped faces.
-    For frames where detection fails, the nearest successfully detected box is
-    reused (temporal propagation); if no frame in the clip has a detected face
-    the fallback is a center crop.
+        # torchvision per-frame (wrap in lambda)
+        import torchvision.transforms as T
+        t = T.Compose([T.Resize(224), T.ToTensor()])
+        Processor(transform=lambda fs: torch.stack([t(f) for f in fs]).permute(1,0,2,3))
 
-    Args:
-        transform: VideoTransform in train or val mode.
-        detector: FaceDetector instance. Pass None to skip face detection
-            (equivalent to the old VideoTransform-only behaviour).
+        # No transform — returns face-cropped PIL list
+        Processor(detector=FaceDetector())
+
+    Call interface (transformers-style)::
+
+        tensor = processor(frames)                      # positional
+        tensor = processor(videos=frames)               # keyword
+        crops  = processor(videos=frames, return_tensors=None)  # PIL list
+
+    ``return_tensors`` is only relevant when ``transform=None``:
+        - ``"pt"``  → ImageNet-normalised ``Tensor [C, T, H, W]``
+        - ``None``  → ``List[PIL.Image]`` (face-cropped)
+
+    When ``transform`` is provided it controls the output format entirely
+    (``return_tensors`` is ignored).
+
+    ``crop_frames`` is exposed separately for feature-extraction tasks
+    (e.g. cluster split) that need face crops without a full transform.
     """
 
     def __init__(
         self,
-        transform: VideoTransform,
+        transform: Optional[Callable[[List[Image.Image]], Any]] = None,
         detector: Optional[FaceDetector] = None,
     ) -> None:
         self.transform = transform
         self.detector = detector
 
-    def __call__(self, frames: List[Image.Image]) -> torch.Tensor:
-        """
-        Args:
-            frames: T PIL Images (one clip).
-        Returns:
-            Tensor [C, T, H, W].
-        """
-        if self.detector is not None:
-            frames = self._crop_faces(frames)
-        return self.transform(frames)
 
+    def crop_frames(self, frames: List[Image.Image]) -> List[Image.Image]:
+        """Face-crop only, no transform. Reusable for feature extraction."""
+        if self.detector is not None:
+            return self._crop_faces(frames)
+        return frames
+
+    def __call__(
+        self,
+        videos: Optional[List[Image.Image]] = None,
+        *,
+        return_tensors: Optional[str] = "pt",
+    ) -> Any:
+        """
+        Process one video clip.
+
+        Args:
+            videos: ``List[PIL.Image]`` — T frames of one clip.
+            return_tensors: output format when ``transform=None``.
+                ``"pt"`` → ``Tensor [C, T, H, W]`` (ImageNet-normalised).
+                ``None`` → ``List[PIL.Image]`` (face-cropped frames).
+
+        Returns:
+            Output of ``transform(cropped)``, or — when ``transform`` is None —
+            a tensor or PIL list depending on ``return_tensors``.
+        """
+        if videos is None:
+            raise ValueError("Provide frames via positional arg or videos=<list>")
+
+        cropped = self.crop_frames(videos)
+
+        if self.transform is not None:
+            return self.transform(cropped)
+
+        if return_tensors == "pt":
+            return _frames_to_tensor(cropped)
+        return cropped
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
 
     def _crop_faces(self, frames: List[Image.Image]) -> List[Image.Image]:
         boxes = self.detector.detect_batch(frames)
 
+        # Forward propagation: fill None from the nearest earlier valid box
         last: Optional[Box] = None
         for i, box in enumerate(boxes):
             if box is not None:
@@ -148,6 +198,7 @@ class Processor:
             elif last is not None:
                 boxes[i] = last
 
+        # Backward propagation: fill remaining None from the nearest later valid box
         last = None
         for i in range(len(boxes) - 1, -1, -1):
             if boxes[i] is not None:

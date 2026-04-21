@@ -3,6 +3,8 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, ConcatDataset, Subset
 import os
+import random as _random
+import numpy as np
 import torch
 import lightning as pl
 from typing import List, Optional
@@ -15,6 +17,18 @@ from src.data.transforms import VideoTransform
 from src.data.processor import FaceDetector, Processor
 from src.data.split import concat_cluster_split
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
+
+
+def _worker_init_fn(worker_id: int) -> None:
+    """Reseed numpy and random per DataLoader worker.
+
+    Without this, all forked workers inherit the same numpy state from the parent
+    process → correlated np.random.randint calls → same start_frame chosen for
+    videos of equal length across workers → loss of temporal diversity.
+    """
+    seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(seed)
+    _random.seed(seed)
 
 
 def _class_weights(values: list, n_classes: int) -> torch.Tensor:
@@ -195,9 +209,10 @@ def train(
         ]
         full_val_dataset = ConcatDataset(val_datasets_mirror)
 
-        typer.echo("🔍 Running cluster-based split on CSV dataset…")
+        typer.echo("🔍 Running cluster-based split on CSV dataset (face crops)…")
         train_idx, val_idx, test_idx = concat_cluster_split(
-            train_datasets, n_clusters=3, seed=42, n_feature_frames=4
+            train_datasets, n_clusters=3, seed=42, n_feature_frames=4,
+            processor=train_transform,
         )
 
         train_ds = Subset(full_train_dataset, train_idx)
@@ -247,9 +262,10 @@ def train(
                 for path in dataset_paths if os.path.exists(path)
             ])
 
-            typer.echo("🔍 Running cluster-based split (KMeans on visual features)…")
+            typer.echo("🔍 Running cluster-based split (KMeans on face crops)…")
             train_idx, val_idx, test_idx = concat_cluster_split(
-                train_datasets, n_clusters=3, seed=42, n_feature_frames=4
+                train_datasets, n_clusters=3, seed=42, n_feature_frames=4,
+                processor=train_transform,
             )
 
             train_ds = Subset(full_train_dataset, train_idx)
@@ -257,14 +273,19 @@ def train(
             test_ds  = Subset(full_val_dataset,   test_idx)
             typer.echo(f"Cluster split → Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-                              pin_memory=True,
-                              persistent_workers=True)
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=True,
+        persistent_workers=num_workers > 0,
+        worker_init_fn=_worker_init_fn,
+    )
 
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                            num_workers=num_workers,
-                            pin_memory=True,
-                            persistent_workers=True)
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True,
+        persistent_workers=num_workers > 0,
+        worker_init_fn=_worker_init_fn,
+    )
 
 
     # ── Class weights (only for meta CSV mode) ───────────────────────────────
@@ -298,31 +319,28 @@ def train(
     for name, param in lit_model.model.named_parameters():
         if param.requires_grad:
             trainable_layers.append(name)
-        else:
-            print(f'ПУПУПУУУУ ХУЕТА: {name, param.requires_grad}')
 
     typer.echo(f"Trainable layers ({len(trainable_layers)}):")
-    #checkpoint_callback = ModelCheckpoint(
-    #    dirpath='checkpoints/',
-    #    filename='best-{epoch:02d}-{val_auc:.4f}',
-    #    monitor='val_auc',
-    #    mode='max',
-    #    save_top_k=1,
-    #    save_last=True,
-    #    verbose=True
-    #)
-
+    checkpoint_callback = ModelCheckpoint(
+        dirpath='checkpoints/',
+        filename='best-{epoch:02d}-{val_auc:.4f}',
+        monitor='val_auc',
+        mode='max',
+        save_top_k=1,
+        save_last=True,
+        verbose=True,
+    )
 
     early_stop_callback = EarlyStopping(
         monitor='val_auc',
         min_delta=0.001,
         patience=15,
         verbose=True,
-        mode='max'
+        mode='max',
     )
 
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
-    callbacks = [early_stop_callback, lr_monitor]
+    callbacks = [checkpoint_callback, early_stop_callback, lr_monitor]
 
     trainer = pl.Trainer(callbacks=callbacks,strategy="ddp_find_unused_parameters_true",
                          **trainer_cfg)

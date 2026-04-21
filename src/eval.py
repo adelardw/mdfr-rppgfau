@@ -6,15 +6,17 @@ import torch.nn as nn
 import numpy as np
 import typer
 import gc
-from PIL import Image 
+import time
+from PIL import Image
 from pytorch_grad_cam import LayerCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from torchvision import transforms
 from omegaconf import OmegaConf
 from src.models.rppg_p_fau_lightning import FauRPPGDeepFakeRecognizer
+from src.data.processor import FaceDetector, Processor
+from src.data.transforms import VideoTransform
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
@@ -58,14 +60,12 @@ def rppg_reshape_transform(tensor):
 # =========================================================================
 
 class GradCAMModelWrapper(nn.Module):
+    """Принимает [T, 3, H, W] → упаковывает в [1, 3, T, H, W] для модели."""
     def __init__(self, model):
         super().__init__()
         self.model = model
     def forward(self, x):
-        # x: (128, 3, 224, 224) -> превращаем в видео (1, 3, 128, 224, 224)
-        x_video = x.unsqueeze(0).permute(0, 2, 1, 3, 4)
-        logits = self.model(x_video, return_info=False)
-        return logits
+        return self.model(x.unsqueeze(0).permute(0, 2, 1, 3, 4), return_info=False)
 
 # =========================================================================
 # 3. ВИЗУАЛИЗАТОР
@@ -109,20 +109,31 @@ def process(
     output_path: str = typer.Option("viz_rppg.avi", "-o", help="Output video"),
     ckpt_path: str = typer.Option(..., "-c", help="Model checkpoint"),
     config_path: str = typer.Option("config.yaml", "-cfg", help="Config file"),
-    device: str = typer.Option("cuda", help="Device"),
+    device: str = typer.Option("cuda", help="Device (cuda / cpu / mps)"),
     use_rppg: bool = typer.Option(False, "--use-rppg", help="Visualize PhysNet (rPPG) attention"),
     target_stage: int = typer.Option(3, help="For FAU only: Swin stage (1-4)")
 ):
     torch.set_grad_enabled(True)
-    
+
     # --- Load ---
     print(f"Loading checkpoint: {ckpt_path}")
     file_config = OmegaConf.load(config_path)
-    defaults = {'backbone_fau': 'swin_transformer_tiny', 'num_frames': 128, 'num_classes': 2, 'dropout': 0.1, 'videomae_model_name': 'MCG-NJU/videomae-base', 'num_au_classes': 12, 'lora_cfg': None}
+    defaults = {
+        'backbone_fau': 'swin_transformer_tiny',
+        'num_frames': 128,
+        'num_classes': 2,
+        'dropout': 0.1,
+        'num_au_classes': 12,
+        'lora_cfg': None,
+        'num_gender_classes': 0,
+        'num_ethnicity_classes': 0,
+        'num_emotion_classes': 0,
+    }
     model_params = {**defaults, **OmegaConf.to_container(file_config.model_params, resolve=True)}
-    
+
     lit_model = FauRPPGDeepFakeRecognizer.load_from_checkpoint(ckpt_path, model_params=model_params, map_location=device)
-    for param in lit_model.parameters(): param.requires_grad = True
+    for param in lit_model.parameters():
+        param.requires_grad = True
     lit_model.eval()
     lit_model.to(device)
     
@@ -160,28 +171,50 @@ def process(
     # --- Processing ---
     cap = cv2.VideoCapture(video_path)
     orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    print(f"Video: {total_frames} frames @ {orig_fps:.1f} FPS")
+
+    processor = Processor(
+        transform=VideoTransform(size=(224, 224), training=False),
+        detector=FaceDetector(margin=20, device="cpu"),
+    )
+
     viz = Visualizer()
     BATCH_SIZE = 128
-    
-    frames_buffer = []
-    raw_buffer = []
-    rppg_buffer = []
-    writer = None
 
-    def process_chunk(frames_t, raw_frames, rppg_hist, vid_writer):
-        input_tensor = torch.stack(frames_t).to(device) 
-        input_tensor.requires_grad = True
-        
-        # Inference
+    # autocast только если устройство поддерживает
+    _autocast_device = device if device in ("cuda", "cpu") else "cpu"
+
+    frames_buffer = []   # List[PIL.Image]
+    raw_buffer    = []
+    rppg_buffer   = []
+    writer        = None
+    chunks_done   = 0
+    t_start       = time.time()
+
+    def process_chunk(frames_pil, raw_frames, rppg_hist, vid_writer, n_real_frames):
+        """
+        frames_pil может быть длиннее n_real_frames (padding хвоста).
+        CAM и rPPG считаются на полном буфере, рендерятся только n_real_frames кадров.
+        """
+        video_tensor = processor(frames_pil).to(device)   # [3, T, H, W]
+        input_tensor = video_tensor.permute(1, 0, 2, 3)   # [T, 3, H, W]
+        input_tensor = input_tensor.requires_grad_(True)
+
+        # Inference (без градиентов)
         with torch.no_grad():
             video_input = input_tensor.unsqueeze(0).permute(0, 2, 1, 3, 4)
             info_out = lit_model.model(video_input, return_info=True)
-            rppg_sig = info_out["rPPG"][0].cpu().numpy()
+
+            rppg_raw = info_out["rPPG"][0].cpu().numpy()
+            # Обрезаем/паддим rPPG до длины чанка
+            T = len(frames_pil)
+            if len(rppg_raw) >= T:
+                rppg_sig = rppg_raw[:T]
+            else:
+                pad = np.full(T - len(rppg_raw), rppg_raw[-1] if len(rppg_raw) else 0.0)
+                rppg_sig = np.concatenate([rppg_raw, pad])
+
             probs = torch.softmax(info_out["logits"], dim=1)
             score_real = probs[0, 1].item()
             is_real = score_real > 0.5
@@ -191,73 +224,79 @@ def process(
 
         # CAM
         targets = [ClassifierOutputTarget(1 if is_real else 0)]
-        with torch.amp.autocast('cuda'):
-            # PhysNet вернет (1, 64, 128, 8, 8) -> reshape -> (128, 64, 8, 8)
+        with torch.amp.autocast(_autocast_device):
             grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
-            
+
         del input_tensor, video_input
-        torch.cuda.empty_cache()
+        if device == "cuda":
+            torch.cuda.empty_cache()
         gc.collect()
 
-        # Render
-        num_frames = len(raw_frames)
+        # Render — только n_real_frames кадров (паддинг не пишем)
         frame_h, frame_w = raw_frames[0].shape[:2]
         if vid_writer is None:
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             vid_writer = cv2.VideoWriter(output_path, fourcc, orig_fps, (frame_w, frame_h + 150))
 
-        for i in range(num_frames):
+        for i in range(n_real_frames):
             orig = cv2.resize(raw_frames[i], (frame_w, frame_h))
             orig_rgb = cv2.cvtColor(orig, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            
-            # Если кадров меньше, чем хитмапов (из-за паддинга), проверяем индекс
+
             if i < len(grayscale_cam):
                 mask = grayscale_cam[i]
-                if np.max(mask) > 0: mask = mask / np.max(mask)
+                if np.max(mask) > 0:
+                    mask = mask / np.max(mask)
                 mask = np.power(mask, 0.7)
             else:
-                mask = np.zeros((224, 224), dtype=np.float32)
+                mask = np.zeros((frame_h, frame_w), dtype=np.float32)
 
             mask_resized = cv2.resize(mask, (frame_w, frame_h))
             vis = show_cam_on_image(orig_rgb, mask_resized, use_rgb=True)
             vis = cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
 
-            val = rppg_sig[i] if i < len(rppg_sig) else 0
-            rppg_hist.append(val)
-            if len(rppg_hist) > 100: rppg_hist.pop(0)
+            rppg_hist.append(float(rppg_sig[i]))
+            if len(rppg_hist) > 100:
+                rppg_hist.pop(0)
             graph_img = viz.draw_graph_strip(rppg_hist, "rPPG Pulse", "#00ff00", frame_w, 150)
 
-            cv2.rectangle(vis, (0,0), (300, 80), (0,0,0), -1)
+            cv2.rectangle(vis, (0, 0), (300, 80), (0, 0, 0), -1)
             cv2.putText(vis, label_text, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color_text, 2)
-            cv2.putText(vis, mode_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
+            cv2.putText(vis, mode_text,  (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
             vid_writer.write(np.vstack([vis, graph_img]))
-            
+
         return rppg_hist, vid_writer
 
     print("Starting...")
     while True:
         ret, frame = cap.read()
-        if not ret: break
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        tensor = transform(Image.fromarray(rgb))
-        frames_buffer.append(tensor)
+        if not ret:
+            break
+        frames_buffer.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         raw_buffer.append(frame)
-        
+
         if len(frames_buffer) == BATCH_SIZE:
-            rppg_buffer, writer = process_chunk(frames_buffer, raw_buffer, rppg_buffer, writer)
+            rppg_buffer, writer = process_chunk(frames_buffer, raw_buffer, rppg_buffer, writer, BATCH_SIZE)
+            frames_done = (chunks_done + 1) * BATCH_SIZE
+            chunks_done += 1
+            elapsed = time.time() - t_start
+            fps_proc = frames_done / elapsed if elapsed > 0 else 0
+            pct = f"{100 * frames_done / total_frames:.1f}%" if total_frames > 0 else "?"
+            print(f"  chunk {chunks_done} | {frames_done} frames | {pct} | {fps_proc:.1f} fps")
             frames_buffer, raw_buffer = [], []
-            
-    if len(frames_buffer) > 0:
-        print(f"Tail processing: {len(frames_buffer)}")
-        needed = BATCH_SIZE - len(frames_buffer)
-        frames_buffer_padded = frames_buffer.copy()
-        frames_buffer_padded.extend([frames_buffer[-1]] * needed)
-        _, writer = process_chunk(frames_buffer_padded, raw_buffer, rppg_buffer, writer)
+
+    if frames_buffer:
+        n_real = len(frames_buffer)
+        print(f"Tail chunk: {n_real} real frames (padding to {BATCH_SIZE})")
+        needed = BATCH_SIZE - n_real
+        frames_padded = frames_buffer + [frames_buffer[-1]] * needed
+        rppg_buffer, writer = process_chunk(frames_padded, raw_buffer, rppg_buffer, writer, n_real)
 
     cap.release()
-    if writer: writer.release()
-    print(f"Done! Saved to {output_path}")
+    if writer:
+        writer.release()
+    elapsed = time.time() - t_start
+    print(f"Done in {elapsed:.1f}s! Saved to {output_path}")
 
 if __name__ == "__main__":
     app()

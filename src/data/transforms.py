@@ -71,6 +71,15 @@ class VideoTransform:
         return torch.stack(tensors).permute(1, 0, 2, 3)
 
     def _train(self, frames):
+        # Normalize to consistent size before augmentation.
+        # Face crops from MTCNN have variable pixel dimensions (bounding boxes change
+        # as the face moves). RandomResizedCrop.get_params returns absolute pixel
+        # coordinates based on frames[0]; applying them to frames with different
+        # dimensions causes PIL to pad out-of-bounds regions with black, introducing
+        # artificial temporal variations that corrupt the rPPG signal.
+        pre_size = (int(self.size[0] * 1.15), int(self.size[1] * 1.15))
+        frames = [TF.resize(f, pre_size) for f in frames]
+
         # --- sample ALL random params ONCE for the whole clip ---
         do_flip = random.random() < self.horizontal_flip_p
 
