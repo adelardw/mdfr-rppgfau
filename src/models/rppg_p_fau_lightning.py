@@ -119,8 +119,8 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
             return x, targets["label"], targets
         return x, targets, {"label": targets}
 
-    def forward(self, x, *args, **kwargs):
-        return self.model(x, *args, **kwargs)
+    def forward(self, x):
+        return self.model(x, return_info=False)
 
     # ── Training ──────────────────────────────────────────────────────────────
 

@@ -40,7 +40,7 @@ class DeepfakeDetector(nn.Module):
 
         if lora_cfg:
             peft_config = LoraConfig(**lora_cfg)
-            self.model = get_peft_model(self.videomae, peft_config)
+            self.videomae = get_peft_model(self.videomae, peft_config)
         else:
             for param in self.videomae.parameters():
                 param.requires_grad = False
@@ -73,7 +73,7 @@ class DeepfakeDetector(nn.Module):
         tokens_mae = self.mae_proj(mae_out)
 
         x_au_input = x_video.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
-        au_raw = self.au_encoder(x_au_input)
+        au_raw, _, _ = self.au_encoder(x_au_input)
         au_raw = au_raw.view(B, T, -1, au_raw.shape[-1])
 
         au_flat = au_raw.flatten(1, 2)

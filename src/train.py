@@ -199,6 +199,24 @@ def train(
         if not train_datasets:
             raise Exception("Ни один CSV-датасет не был загружен. Проверьте пути.")
 
+        # Validate that num_*_classes in config matches actual class counts in the CSV.
+        # Only checked when the head is enabled (num > 0); 0 means "disabled".
+        ds0 = train_datasets[0]
+        for cfg_key, attr, label in (
+            ("num_gender_classes",    "gender_map",    "gender"),
+            ("num_ethnicity_classes", "ethnicity_map", "ethnicity"),
+            ("num_emotion_classes",   "emotion_map",   "emotion"),
+        ):
+            cfg_val = model_cfg.get(cfg_key, 0)
+            actual  = len(getattr(ds0, attr))
+            if cfg_val > 0 and actual > 0 and cfg_val != actual:
+                raise ValueError(
+                    f"{cfg_key}={cfg_val} в конфиге, но в CSV найдено {actual} классов для '{label}': "
+                    f"{getattr(ds0, attr)}. Исправьте конфиг."
+                )
+            if cfg_val > 0 and actual > 0:
+                typer.echo(f"  {cfg_key}={cfg_val} — классы: {getattr(ds0, attr)}")
+
         full_train_dataset = ConcatDataset(train_datasets)
         typer.echo(f"Total train videos (CSV): {len(full_train_dataset)}")
 
