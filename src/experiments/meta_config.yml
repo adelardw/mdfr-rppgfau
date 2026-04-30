@@ -27,6 +27,12 @@ train_params:
   gender_loss_weight: 0.3
   ethnicity_loss_weight: 0.3
   emotion_loss_weight: 0.3
+  # Metric learning on the fused embedding (helps when batch is tiny, e.g. 4).
+  metric_loss_type: triplet      # triplet | supcon | none
+  metric_loss_weight: 0.2
+  triplet_margin: 0.3
+  supcon_temperature: 0.1
+  memory_bank_size: 256          # FIFO of past embeddings; 0 disables
 
 trainer_params:
   max_epochs: 1000
