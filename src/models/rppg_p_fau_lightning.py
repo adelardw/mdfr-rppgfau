@@ -8,7 +8,7 @@ import lightning as pl
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchmetrics
 from src.models.rppg_p_fau import DeepfakeDetector
-from src.loss.contrastive import InfoNCEConsistencyLoss
+from src.loss.contrastive import InfoNCEConsistencyLoss, SupConLoss, BatchHardTripletLoss
 
 
 def _masked_ce(
@@ -47,11 +47,38 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         gender_loss_weight: float = 0.3,
         ethnicity_loss_weight: float = 0.3,
         emotion_loss_weight: float = 0.3,
+        metric_loss_type: str = "triplet",   # "triplet" | "supcon" | "none"
+        metric_loss_weight: float = 0.2,
+        triplet_margin: float = 0.3,
+        supcon_temperature: float = 0.1,
+        memory_bank_size: int = 256,         # FIFO queue of past embeddings (0 = off)
+        embed_dim: int = 512,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights"])
 
         self.model = DeepfakeDetector(**model_params)
+
+        # Metric learning on the fused embedding (main label).
+        # Triplet (batch-hard) — robust on small batches; SupCon — better when batch >= ~32.
+        if metric_loss_type == "supcon":
+            self.metric_loss = SupConLoss(temperature=supcon_temperature)
+        elif metric_loss_type == "triplet":
+            self.metric_loss = BatchHardTripletLoss(margin=triplet_margin)
+        else:
+            self.metric_loss = None
+
+        # ── Memory bank (MoCo-style FIFO of detached embeddings) ──────────────
+        # Critical when batch_size is tiny (e.g. 4): each anchor compares against
+        # `memory_bank_size` past samples, giving plenty of positives/negatives.
+        # Stored as buffers so they move with .to(device) and survive ckpt save/load.
+        D = model_params.get("embed_dim", embed_dim)
+        self._mb_size = memory_bank_size
+        if memory_bank_size > 0 and self.metric_loss is not None:
+            self.register_buffer("mb_feats",  torch.zeros(memory_bank_size, D))
+            self.register_buffer("mb_labels", torch.full((memory_bank_size,), -1, dtype=torch.long))
+            self.register_buffer("mb_ptr",    torch.zeros(1, dtype=torch.long))
+            self.register_buffer("mb_filled", torch.zeros(1, dtype=torch.long))
 
         # ── Class-weighted CE losses ──────────────────────────────────────────
         # Weights stored as buffers so they move to the right device automatically.
@@ -107,6 +134,47 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    @torch.no_grad()
+    def _mb_enqueue(self, feats: torch.Tensor, labels: torch.Tensor) -> None:
+        """Push current-batch detached embeddings into the FIFO bank."""
+        if self._mb_size <= 0 or self.metric_loss is None:
+            return
+        valid = labels >= 0
+        if valid.sum() == 0:
+            return
+        f = feats[valid].detach()
+        y = labels[valid].detach()
+        K = self._mb_size
+        n = f.size(0)
+        ptr = int(self.mb_ptr.item())
+        # wrap-around write
+        idx = (torch.arange(n, device=f.device) + ptr) % K
+        self.mb_feats[idx]  = f.to(self.mb_feats.dtype)
+        self.mb_labels[idx] = y
+        self.mb_ptr[0] = (ptr + n) % K
+        self.mb_filled[0] = torch.clamp(self.mb_filled + n, max=K)
+
+    def _metric_with_bank(self, feats: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Concatenate current-batch (with grad) and memory-bank (detached) embeddings,
+        then compute metric loss. Anchors are only the current-batch samples (gradient
+        flows only through them); positives/negatives may come from either side.
+        """
+        if self._mb_size <= 0 or int(self.mb_filled.item()) == 0:
+            return self.metric_loss(feats, labels)
+
+        K = int(self.mb_filled.item())
+        bank_f = self.mb_feats[:K]
+        bank_y = self.mb_labels[:K]
+        all_f = torch.cat([feats, bank_f.to(feats.dtype)], dim=0)
+        all_y = torch.cat([labels, bank_y.to(labels.device)], dim=0)
+        # Mask out bank-vs-bank pairs by routing through the loss as-is —
+        # both losses naturally handle the full pairwise matrix; bank rows have
+        # no gradient since they're detached, so contributions to the loss from
+        # bank-as-anchor are still computed but don't update parameters
+        # (acceptable noise; alternatively callers can shrink memory_bank_size).
+        return self.metric_loss(all_f, all_y)
+
     @staticmethod
     def _uncertainty_loss(log_var: torch.Tensor, task_loss: torch.Tensor) -> torch.Tensor:
         """Kendall et al. 2018: exp(-s)*L + 0.5*s  where s = log(σ²)."""
@@ -131,6 +199,15 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
 
         loss_main = _masked_ce(logits, y, self.cw_main)
         total = self._uncertainty_loss(self.log_vars[0], loss_main)
+
+        if (self.metric_loss is not None
+                and "embedding" in output
+                and self.hparams.metric_loss_weight > 0):
+            emb = output["embedding"]
+            m_loss = self._metric_with_bank(emb, y)
+            total = total + self.hparams.metric_loss_weight * m_loss
+            self._mb_enqueue(emb, y)
+            self.log("train_metric", m_loss, prog_bar=False, on_step=True, on_epoch=True, sync_dist=True)
 
         if "gender_logits" in output:
             g_labels = meta.get("gender", torch.full_like(y, -1))

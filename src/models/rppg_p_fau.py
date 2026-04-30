@@ -107,6 +107,7 @@ class DeepfakeDetector(nn.Module):
         if return_info:
             out = {
                 "logits": logits,
+                "embedding": normed,
                 "attn_weights": attn_weights,
                 "au_embeddings": tokens_au.detach(),
                 "phys_embeddings": tokens_phys.detach(),

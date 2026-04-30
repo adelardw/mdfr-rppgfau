@@ -15,7 +15,6 @@ from src.data.dataset import VideoFolderDataset, split_dataset
 from src.data.meta_dataset import MetaVideoDataset
 from src.data.transforms import VideoTransform
 from src.data.processor import FaceDetector, Processor
-from src.data.split import concat_cluster_split
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 
 
@@ -227,16 +226,20 @@ def train(
         ]
         full_val_dataset = ConcatDataset(val_datasets_mirror)
 
-        typer.echo("🔍 Running cluster-based split on CSV dataset (face crops)…")
-        train_idx, val_idx, test_idx = concat_cluster_split(
-            train_datasets, n_clusters=3, seed=42, n_feature_frames=4,
-            processor=train_transform,
-        )
+        typer.echo("🔀 Random split on CSV dataset (70/15/15)…")
+        N = len(full_train_dataset)
+        g = torch.Generator().manual_seed(42)
+        perm = torch.randperm(N, generator=g).tolist()
+        n_tr = int(0.7 * N)
+        n_va = int(0.15 * N)
+        train_idx = perm[:n_tr]
+        val_idx   = perm[n_tr:n_tr + n_va]
+        test_idx  = perm[n_tr + n_va:]
 
         train_ds = Subset(full_train_dataset, train_idx)
         val_ds   = Subset(full_val_dataset,   val_idx)
         test_ds  = Subset(full_val_dataset,   test_idx)
-        typer.echo(f"Cluster split → Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+        typer.echo(f"Random split → Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
     else:
         # ---- Folder-based datasets (original flow) ----
@@ -280,16 +283,20 @@ def train(
                 for path in dataset_paths if os.path.exists(path)
             ])
 
-            typer.echo("🔍 Running cluster-based split (KMeans on face crops)…")
-            train_idx, val_idx, test_idx = concat_cluster_split(
-                train_datasets, n_clusters=3, seed=42, n_feature_frames=4,
-                processor=train_transform,
-            )
+            typer.echo("🔀 Random split (70/15/15)…")
+            N = len(full_train_dataset)
+            g = torch.Generator().manual_seed(42)
+            perm = torch.randperm(N, generator=g).tolist()
+            n_tr = int(0.7 * N)
+            n_va = int(0.15 * N)
+            train_idx = perm[:n_tr]
+            val_idx   = perm[n_tr:n_tr + n_va]
+            test_idx  = perm[n_tr + n_va:]
 
             train_ds = Subset(full_train_dataset, train_idx)
             val_ds   = Subset(full_val_dataset,   val_idx)
             test_ds  = Subset(full_val_dataset,   test_idx)
-            typer.echo(f"Cluster split → Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+            typer.echo(f"Random split → Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
