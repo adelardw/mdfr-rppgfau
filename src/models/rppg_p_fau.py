@@ -2,6 +2,7 @@
 # Architecture: [FAU + rPPG] -> Per-AU Temporal PE -> TransformerDecoder (Q-Former) -> Attention Pooling -> Classifier
 # ====================================================================================================================
 
+import copy
 import torch
 import torch.nn as nn
 from src.backbones.fau_encoder import FAUEncoder
@@ -26,7 +27,8 @@ class DeepfakeDetector(nn.Module):
                  full_train: bool = False,
                  num_gender_classes: int = 0,
                  num_ethnicity_classes: int = 0,
-                 num_emotion_classes: int = 0):
+                 num_emotion_classes: int = 0,
+                 use_anchor_teachers: bool = True):
         super().__init__()
 
         self.au_encoder = FAUEncoder(num_classes=num_au_classes, backbone=backbone_fau)
@@ -42,6 +44,25 @@ class DeepfakeDetector(nn.Module):
             self.phys_encoder.load_pretrained(phys_ckpt_path)
             for par in self.phys_encoder.parameters():
                 par.requires_grad = full_train
+
+        # Anchor teachers: frozen snapshots of pretrained encoders.
+        # Used by the lightning module to compute a distillation loss that
+        # prevents the (trainable) encoders from drifting away from their
+        # rPPG/FAU domains while fine-tuning on deepfake detection.
+        self.use_anchor_teachers = bool(use_anchor_teachers and full_train
+                                        and au_ckpt_path and phys_ckpt_path)
+        if self.use_anchor_teachers:
+            self.au_teacher = copy.deepcopy(self.au_encoder)
+            self.phys_teacher = copy.deepcopy(self.phys_encoder)
+            for p in self.au_teacher.parameters():
+                p.requires_grad = False
+            for p in self.phys_teacher.parameters():
+                p.requires_grad = False
+            self.au_teacher.eval()
+            self.phys_teacher.eval()
+        else:
+            self.au_teacher = None
+            self.phys_teacher = None
 
         self.au_proj = nn.Linear(self.au_encoder.out_channels, embed_dim)
         self.phys_proj = nn.Linear(self.phys_encoder.out_channels, embed_dim)
@@ -66,6 +87,14 @@ class DeepfakeDetector(nn.Module):
         self.gender_head = nn.Linear(embed_dim, num_gender_classes) if num_gender_classes > 0 else None
         self.ethnicity_head = nn.Linear(embed_dim, num_ethnicity_classes) if num_ethnicity_classes > 0 else None
         self.emotion_head = nn.Linear(embed_dim, num_emotion_classes) if num_emotion_classes > 0 else None
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.au_teacher is not None:
+            self.au_teacher.eval()
+        if self.phys_teacher is not None:
+            self.phys_teacher.eval()
+        return self
 
     def forward(self, x_video, return_info=True):
         """
@@ -109,11 +138,21 @@ class DeepfakeDetector(nn.Module):
                 "logits": logits,
                 "embedding": normed,
                 "attn_weights": attn_weights,
-                "au_embeddings": tokens_au.detach(),
-                "phys_embeddings": tokens_phys.detach(),
-                "au_logits": cl.detach(),
-                "rPPG": rPPG.detach(),
+                "au_embeddings": tokens_au,
+                "phys_embeddings": tokens_phys,
+                "au_logits": cl,
+                "au_logits_edge": cl_edge,
+                "rPPG": rPPG,
+                "au_raw": au_raw,
+                "phys_raw": phys_raw,
             }
+            if self.au_teacher is not None and self.phys_teacher is not None:
+                with torch.no_grad():
+                    au_raw_t, _, _ = self.au_teacher(x_au_input)
+                    rPPG_t, phys_raw_t = self.phys_teacher(x_video)
+                out["au_raw_teacher"] = au_raw_t
+                out["phys_raw_teacher"] = phys_raw_t
+                out["rPPG_teacher"] = rPPG_t
             if self.gender_head is not None:
                 out["gender_logits"] = self.gender_head(normed)
             if self.ethnicity_head is not None:

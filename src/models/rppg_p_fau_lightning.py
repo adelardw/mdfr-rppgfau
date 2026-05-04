@@ -53,6 +53,7 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         supcon_temperature: float = 0.1,
         memory_bank_size: int = 256,         # FIFO queue of past embeddings (0 = off)
         embed_dim: int = 512,
+        anchor_distill_weight: float = 1.0,  # MSE pull toward frozen pretrained encoders
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights"])
@@ -199,6 +200,20 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
 
         loss_main = _masked_ce(logits, y, self.cw_main)
         total = self._uncertainty_loss(self.log_vars[0], loss_main)
+
+        # Anchor distillation: keep encoders close to their pretrained features.
+        # Without this, full_train=True turns the encoders into a generic
+        # randomly-finetuned backbone (rPPG/FAU priors are lost) and cross-eval
+        # collapses; with this, they can adapt for DF but stay in-domain.
+        if (self.hparams.anchor_distill_weight > 0
+                and "au_raw_teacher" in output
+                and "phys_raw_teacher" in output):
+            d_au = F.mse_loss(output["au_raw"], output["au_raw_teacher"])
+            d_phys = F.mse_loss(output["phys_raw"], output["phys_raw_teacher"])
+            d_rppg = F.mse_loss(output["rPPG"], output["rPPG_teacher"])
+            d_loss = d_au + d_phys + d_rppg
+            total = total + self.hparams.anchor_distill_weight * d_loss
+            self.log("train_distill", d_loss, prog_bar=False, on_step=True, on_epoch=True, sync_dist=True)
 
         if (self.metric_loss is not None
                 and "embedding" in output
