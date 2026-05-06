@@ -31,6 +31,10 @@ train_params:
   triplet_margin: 0.3
   supcon_temperature: 0.1
   memory_bank_size: 256          # FIFO of past embeddings; 0 disables
+  # Dump per-epoch (clip-level) embeddings + FAU/rPPG features + labels for analysis.
+  # Each train __getitem__ returns one random clip; across epochs the same video
+  # contributes different clips. Set to null to disable.
+  embeddings_dump_dir: ./dumps/embeddings
 
 trainer_params:
   max_epochs: 1000

@@ -54,9 +54,20 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         memory_bank_size: int = 256,         # FIFO queue of past embeddings (0 = off)
         embed_dim: int = 512,
         anchor_distill_weight: float = 1.0,  # MSE pull toward frozen pretrained encoders
+        embeddings_dump_dir: str | None = None,  # if set, dump per-epoch (emb, fau, phys, rppg, label) tensors
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights"])
+
+        # Per-clip dump buffers. Each train __getitem__ returns ONE random clip
+        # (start_frame is random), so per epoch we collect one feature row per
+        # sampled clip; across epochs the same video contributes different clips.
+        self._dump_dir = embeddings_dump_dir
+        if embeddings_dump_dir:
+            os.makedirs(embeddings_dump_dir, exist_ok=True)
+        self._dump_buf: dict[str, list[torch.Tensor]] = {
+            "embedding": [], "fau": [], "phys": [], "rppg": [], "label": [],
+        }
 
         self.model = DeepfakeDetector(**model_params)
 
@@ -260,6 +271,26 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
                              self.train_emotion_acc(output["emotion_logits"][valid], em_labels[valid]),
                              prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
 
+        if self._dump_dir:
+            with torch.no_grad():
+                # au_raw: [B*T, Num_AU, D_au] -> per-sample mean over T and AU axis
+                au = output["au_raw"]
+                if au.dim() == 3:
+                    au = au.view(y.size(0), -1, au.size(-2), au.size(-1)).mean(dim=(1, 2))
+                else:
+                    au = au.view(y.size(0), -1).mean(dim=1, keepdim=True)
+                # phys_raw: [B, T, D_phys] -> mean over time
+                ph = output["phys_raw"]
+                ph = ph.mean(dim=1) if ph.dim() == 3 else ph
+                # rPPG: signal, store full per-sample
+                rppg = output["rPPG"]
+                rppg = rppg.view(y.size(0), -1)
+                self._dump_buf["embedding"].append(output["embedding"].detach().cpu())
+                self._dump_buf["fau"].append(au.detach().cpu())
+                self._dump_buf["phys"].append(ph.detach().cpu())
+                self._dump_buf["rppg"].append(rppg.detach().cpu())
+                self._dump_buf["label"].append(y.detach().cpu())
+
         self.log("train_loss", total,     prog_bar=True,  on_step=True, on_epoch=True, sync_dist=True)
         self.log("train_ce",   loss_main, prog_bar=False, on_step=True, on_epoch=True, sync_dist=True)
 
@@ -277,6 +308,18 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         self.log("train_rec",  self.train_rec(logits, y),  prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
 
         return total
+
+    def on_train_epoch_end(self) -> None:
+        if not self._dump_dir or not self._dump_buf["label"]:
+            return
+        rank = getattr(self.trainer, "global_rank", 0)
+        out = {k: torch.cat(v, dim=0) for k, v in self._dump_buf.items()}
+        path = os.path.join(
+            self._dump_dir, f"epoch_{self.current_epoch:04d}_rank{rank}.pt"
+        )
+        torch.save(out, path)
+        for v in self._dump_buf.values():
+            v.clear()
 
     # ── Validation ────────────────────────────────────────────────────────────
 
