@@ -31,6 +31,11 @@ class DeepfakeDetector(nn.Module):
                  use_anchor_teachers: bool = True):
         super().__init__()
 
+        if isinstance(full_train, str):
+            full_train = full_train.strip().lower() in ("1", "true", "yes", "y")
+        else:
+            full_train = bool(full_train)
+
         self.au_encoder = FAUEncoder(num_classes=num_au_classes, backbone=backbone_fau)
         if au_ckpt_path:
             print(f"Loading AU Checkpoint: {au_ckpt_path}")
