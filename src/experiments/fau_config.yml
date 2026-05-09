@@ -18,4 +18,6 @@ train_params:
 trainer_params:
   max_epochs: 1000
   accumulate_grad_batches: 2
-  accelerator: auto
+  accelerator: gpu
+  devices: 4
+  num_nodes: 1

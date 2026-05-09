@@ -71,6 +71,7 @@ def evaluate(
     batch_size: int = typer.Option(16, "--batch_size", "-bs"),
     num_workers: int = typer.Option(4, "--num_workers", "-nw"),
     save_path: Optional[str] = typer.Option(None, "--save_path", "-o", help="Сохранить результаты в JSON"),
+    no_face_detector: bool = typer.Option(False, "--no_face_detector", help="Отключить MTCNN-детектор лиц в препроцессинге (для чекпоинтов, обученных без него)"),
 ):
     """
     Evaluate a trained FauRPPGDeepFakeRecognizer.
@@ -108,8 +109,10 @@ def evaluate(
     # Face detector + val transform — identical pipeline to train.py
     val_transform = Processor(
         transform=VideoTransform(size=(224, 224), training=False),
-        detector=FaceDetector(margin=20, device="cpu"),
+        detector=None if no_face_detector else FaceDetector(margin=20, device="cpu"),
     )
+    if no_face_detector:
+        typer.echo("⚠️  Face detector ОТКЛЮЧЁН — кадры подаются как есть (resize 224×224).")
 
     meta_kwargs = dict(
         frames_per_video=num_frames,
@@ -185,16 +188,16 @@ def evaluate(
     )
 
     typer.echo("Загрузка чекпоинта...")
+    # Старые чекпоинты обучались без anchor teachers / memory bank / uncertainty —
+    # отключаем учителей, грузим со strict=False (mb_*, log_vars, *_teacher.* отсутствуют).
+    model_cfg["use_anchor_teachers"] = False
     lit_model = FauRPPGDeepFakeRecognizer.load_from_checkpoint(
-        ckpt_path, model_params=model_cfg, map_location="cpu"
+        ckpt_path, model_params=model_cfg, map_location="cpu", strict=False,
     )
     lit_model.eval()
 
-    device = torch.device(
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
+    # MPS не поддерживает Conv3d (используется в rPPG-энкодере) — fallback на CPU.
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     typer.echo(f"Device: {device}")
     lit_model = lit_model.to(device)
 

@@ -79,7 +79,11 @@ class FaceDetector:
             if boxes is None or len(boxes) == 0:
                 results.append(None)
             else:
-                x1, y1, x2, y2 = (int(v) for v in boxes[0])
+                try:
+                    x1, y1, x2, y2 = (int(float(v)) for v in boxes[0])
+                except (TypeError, ValueError):
+                    results.append(None)
+                    continue
                 w, h = frame.size
                 results.append((
                     max(0, x1 - self.margin),
