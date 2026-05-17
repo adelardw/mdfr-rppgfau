@@ -7,7 +7,8 @@ import torch.nn.functional as F
 import lightning as pl
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchmetrics
-from src.models.rppg_p_fau import DeepfakeDetector
+
+from src.models.rppg_p_fau_df import DeepfakeDetectorDF
 from src.loss.contrastive import InfoNCEConsistencyLoss, SupConLoss, BatchHardTripletLoss
 
 
@@ -24,14 +25,16 @@ def _masked_ce(
     return F.cross_entropy(logits[mask], labels[mask], weight=w)
 
 
-class FauRPPGDeepFakeRecognizer(pl.LightningModule):
-    """
-    Multi-task deepfake detector with:
-      - Uncertainty Weighting (Kendall et al. 2018) for task balancing.
-        log_var[i] = log(σ_i²); loss_i = exp(-log_var[i]) * L_i + 0.5 * log_var[i]
-        Active (trainable) only when aux heads exist; otherwise fixed at 0 → no scaling.
-      - Class-weighted CE per task to handle within-task imbalance (e.g. ethnicity).
-        Weights computed externally from training data and passed as class_weights dict.
+class FauRPPGDeepFakeRecognizerDF(pl.LightningModule):
+    """Lightning wrapper around DeepfakeDetectorDF.
+
+    Mirrors FauRPPGDeepFakeRecognizer (rppg_p_fau_lightning.py) but built on
+    the DF-trained backbones in src.backbones_df:
+      - rPPG = DeepFakesON-Phys  (CelebDF v2 fine-tune)
+      - FAU  = OpenGraphAU       (41 AU hybrid pretrain)
+
+    Defaults to **encoders frozen** (full_train=False inside the model). The
+    Q-Former + classifier are the only trainable parts in that mode.
     """
 
     def __init__(
@@ -43,24 +46,20 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         T_max: int = 10,
         num_classes: int = 2,
         class_weights: dict | None = None,
-        # kept for backward-compat with old configs — replaced by uncertainty weighting
         gender_loss_weight: float = 0.3,
         ethnicity_loss_weight: float = 0.3,
         emotion_loss_weight: float = 0.3,
-        metric_loss_type: str = "triplet",   # "triplet" | "supcon" | "none"
+        metric_loss_type: str = "triplet",
         metric_loss_weight: float = 0.2,
         triplet_margin: float = 0.3,
         supcon_temperature: float = 0.1,
-        memory_bank_size: int = 256,         # FIFO queue of past embeddings (0 = off)
+        memory_bank_size: int = 256,
         embed_dim: int = 512,
-        embeddings_dump_dir: str | None = None,  # if set, dump per-epoch (emb, fau, phys, rppg, label) tensors
+        embeddings_dump_dir: str | None = None,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights"])
 
-        # Per-clip dump buffers. Each train __getitem__ returns ONE random clip
-        # (start_frame is random), so per epoch we collect one feature row per
-        # sampled clip; across epochs the same video contributes different clips.
         self._dump_dir = embeddings_dump_dir
         if embeddings_dump_dir:
             os.makedirs(embeddings_dump_dir, exist_ok=True)
@@ -68,10 +67,8 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
             "embedding": [], "fau": [], "phys": [], "rppg": [], "label": [],
         }
 
-        self.model = DeepfakeDetector(**model_params)
+        self.model = DeepfakeDetectorDF(**model_params)
 
-        # Metric learning on the fused embedding (main label).
-        # Triplet (batch-hard) — robust on small batches; SupCon — better when batch >= ~32.
         if metric_loss_type == "supcon":
             self.metric_loss = SupConLoss(temperature=supcon_temperature)
         elif metric_loss_type == "triplet":
@@ -79,10 +76,6 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         else:
             self.metric_loss = None
 
-        # ── Memory bank (MoCo-style FIFO of detached embeddings) ──────────────
-        # Critical when batch_size is tiny (e.g. 4): each anchor compares against
-        # `memory_bank_size` past samples, giving plenty of positives/negatives.
-        # Stored as buffers so they move with .to(device) and survive ckpt save/load.
         D = model_params.get("embed_dim", embed_dim)
         self._mb_size = memory_bank_size
         if memory_bank_size > 0 and self.metric_loss is not None:
@@ -91,8 +84,6 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
             self.register_buffer("mb_ptr",    torch.zeros(1, dtype=torch.long))
             self.register_buffer("mb_filled", torch.zeros(1, dtype=torch.long))
 
-        # ── Class-weighted CE losses ──────────────────────────────────────────
-        # Weights stored as buffers so they move to the right device automatically.
         def _reg_cw(attr, key):
             w = class_weights.get(key) if class_weights else None
             self.register_buffer(attr, w.float() if w is not None else None,
@@ -103,9 +94,6 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         _reg_cw("cw_ethnicity", "ethnicity")
         _reg_cw("cw_emotion",   "emotion")
 
-        # ── Uncertainty weighting ─────────────────────────────────────────────
-        # 4 slots: [main, gender, ethnicity, emotion]
-        # Trainable only when aux heads exist (otherwise fixed zeros → no scaling).
         num_aux = sum(
             1 for k in ("num_gender_classes", "num_ethnicity_classes", "num_emotion_classes")
             if model_params.get(k, 0) > 0
@@ -115,7 +103,6 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         else:
             self.register_buffer("log_vars", torch.zeros(4))
 
-        # ── Primary metrics ───────────────────────────────────────────────────
         self.train_acc  = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
         self.train_f1   = torchmetrics.F1Score(task="multiclass", num_classes=num_classes, average="macro")
         self.train_prec = torchmetrics.Precision(task="multiclass", num_classes=num_classes, average="macro")
@@ -128,7 +115,6 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         self.val_rec  = torchmetrics.Recall(task="multiclass", num_classes=num_classes, average="macro")
         self.val_auc  = torchmetrics.AUROC(task="multiclass", num_classes=num_classes)
 
-        # ── Aux head metrics ──────────────────────────────────────────────────
         num_gender    = model_params.get("num_gender_classes", 0)
         num_ethnicity = model_params.get("num_ethnicity_classes", 0)
         num_emotion   = model_params.get("num_emotion_classes", 0)
@@ -143,11 +129,10 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
             self.train_emotion_acc = torchmetrics.Accuracy(task="multiclass", num_classes=num_emotion)
             self.val_emotion_acc   = torchmetrics.Accuracy(task="multiclass", num_classes=num_emotion)
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────
 
     @torch.no_grad()
     def _mb_enqueue(self, feats: torch.Tensor, labels: torch.Tensor) -> None:
-        """Push current-batch detached embeddings into the FIFO bank."""
         if self._mb_size <= 0 or self.metric_loss is None:
             return
         valid = labels >= 0
@@ -158,7 +143,6 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         K = self._mb_size
         n = f.size(0)
         ptr = int(self.mb_ptr.item())
-        # wrap-around write
         idx = (torch.arange(n, device=f.device) + ptr) % K
         self.mb_feats[idx]  = f.to(self.mb_feats.dtype)
         self.mb_labels[idx] = y
@@ -166,29 +150,17 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         self.mb_filled[0] = torch.clamp(self.mb_filled + n, max=K)
 
     def _metric_with_bank(self, feats: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """
-        Concatenate current-batch (with grad) and memory-bank (detached) embeddings,
-        then compute metric loss. Anchors are only the current-batch samples (gradient
-        flows only through them); positives/negatives may come from either side.
-        """
         if self._mb_size <= 0 or int(self.mb_filled.item()) == 0:
             return self.metric_loss(feats, labels)
-
         K = int(self.mb_filled.item())
         bank_f = self.mb_feats[:K]
         bank_y = self.mb_labels[:K]
         all_f = torch.cat([feats, bank_f.to(feats.dtype)], dim=0)
         all_y = torch.cat([labels, bank_y.to(labels.device)], dim=0)
-        # Mask out bank-vs-bank pairs by routing through the loss as-is —
-        # both losses naturally handle the full pairwise matrix; bank rows have
-        # no gradient since they're detached, so contributions to the loss from
-        # bank-as-anchor are still computed but don't update parameters
-        # (acceptable noise; alternatively callers can shrink memory_bank_size).
         return self.metric_loss(all_f, all_y)
 
     @staticmethod
     def _uncertainty_loss(log_var: torch.Tensor, task_loss: torch.Tensor) -> torch.Tensor:
-        """Kendall et al. 2018: exp(-s)*L + 0.5*s  where s = log(σ²)."""
         return torch.exp(-log_var) * task_loss + 0.5 * log_var
 
     @staticmethod
@@ -201,7 +173,7 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
     def forward(self, x):
         return self.model(x, return_info=False)
 
-    # ── Training ──────────────────────────────────────────────────────────────
+    # ── Training ──────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):
         x, y, meta = self._unpack_batch(batch)
@@ -258,18 +230,14 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
 
         if self._dump_dir:
             with torch.no_grad():
-                # au_raw: [B*T, Num_AU, D_au] -> per-sample mean over T and AU axis
                 au = output["au_raw"]
                 if au.dim() == 3:
                     au = au.view(y.size(0), -1, au.size(-2), au.size(-1)).mean(dim=(1, 2))
                 else:
                     au = au.view(y.size(0), -1).mean(dim=1, keepdim=True)
-                # phys_raw: [B, T, D_phys] -> mean over time
                 ph = output["phys_raw"]
                 ph = ph.mean(dim=1) if ph.dim() == 3 else ph
-                # rPPG: signal, store full per-sample
-                rppg = output["rPPG"]
-                rppg = rppg.view(y.size(0), -1)
+                rppg = output["rPPG"].view(y.size(0), -1)
                 self._dump_buf["embedding"].append(output["embedding"].detach().cpu())
                 self._dump_buf["fau"].append(au.detach().cpu())
                 self._dump_buf["phys"].append(ph.detach().cpu())
@@ -278,8 +246,6 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
 
         self.log("train_loss", total,     prog_bar=True,  on_step=True, on_epoch=True, sync_dist=True)
         self.log("train_ce",   loss_main, prog_bar=False, on_step=True, on_epoch=True, sync_dist=True)
-
-        # Log learned uncertainty params
         self.log("lv_main",      self.log_vars[0], prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
         self.log("lv_gender",    self.log_vars[1], prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
         self.log("lv_ethnicity", self.log_vars[2], prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
@@ -306,7 +272,7 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
         for v in self._dump_buf.values():
             v.clear()
 
-    # ── Validation ────────────────────────────────────────────────────────────
+    # ── Validation ────────────────────────────────────────────────────────
 
     def validation_step(self, batch, batch_idx):
         x, y, meta = self._unpack_batch(batch)
@@ -349,16 +315,16 @@ class FauRPPGDeepFakeRecognizer(pl.LightningModule):
                              prog_bar=False, sync_dist=True)
 
         probs = F.softmax(logits, dim=1)
-        self.log("val_loss", val_loss,               prog_bar=True,  sync_dist=True)
-        self.log("val_acc",  self.val_acc(logits, y), prog_bar=True,  sync_dist=True)
-        self.log("val_f1",   self.val_f1(logits, y),  prog_bar=True,  sync_dist=True)
+        self.log("val_loss", val_loss,                prog_bar=True,  sync_dist=True)
+        self.log("val_acc",  self.val_acc(logits, y),  prog_bar=True,  sync_dist=True)
+        self.log("val_f1",   self.val_f1(logits, y),   prog_bar=True,  sync_dist=True)
         self.log("val_prec", self.val_prec(logits, y), prog_bar=False, sync_dist=True)
         self.log("val_rec",  self.val_rec(logits, y),  prog_bar=False, sync_dist=True)
         self.log("val_auc",  self.val_auc(probs, y),   prog_bar=True,  sync_dist=True)
 
         return val_loss
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
+    # ── Optimizer ─────────────────────────────────────────────────────────
 
     def configure_optimizers(self):
         encoder_params = (list(self.model.au_encoder.parameters())

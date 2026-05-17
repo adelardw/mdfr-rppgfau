@@ -188,9 +188,7 @@ def evaluate(
     )
 
     typer.echo("Загрузка чекпоинта...")
-    # Старые чекпоинты обучались без anchor teachers / memory bank / uncertainty —
-    # отключаем учителей, грузим со strict=False (mb_*, log_vars, *_teacher.* отсутствуют).
-    model_cfg["use_anchor_teachers"] = False
+    # Старые чекпоинты могут не иметь mb_* / log_vars — грузим strict=False.
     lit_model = FauRPPGDeepFakeRecognizer.load_from_checkpoint(
         ckpt_path, model_params=model_cfg, map_location="cpu", strict=False,
     )
